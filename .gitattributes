@@ -1,0 +1,6 @@
+# Windows-Batch-Dateien brauchen CRLF, sonst verhaken sich Sprungmarken
+*.bat text eol=crlf
+*.cmd text eol=crlf
+
+# Binärdateien
+*.ttf binary

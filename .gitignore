@@ -1,0 +1,19 @@
+# Build-Ausgaben
+build/
+build-*/
+out/
+cmake-build-*/
+
+# JUCE wird beim Build geholt (siehe README / Workflow)
+external/
+
+# IDE / OS
+.vs/
+.vscode/
+.idea/
+*.user
+.DS_Store
+Thumbs.db
+
+# Python
+__pycache__/
