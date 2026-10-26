@@ -33,6 +33,12 @@ namespace kf::theme
     inline const juce::Colour master    { 0xfff2c040 };   // Master: Warngelb
     inline const juce::Colour fx        { 0xff63c79a };   // EQ/FX: Oxid-Grün
 
+    // v0.7-Schichten
+    inline const juce::Colour punch     = body;           // Rot-Orange
+    inline const juce::Colour rumble    = tail;           // Stahlblau
+    inline const juce::Colour grit      { 0xffa8c94a };   // Grit: giftiges Oxid-Gelbgrün
+    inline const juce::Colour global    = brand;          // Kick (global): Warnorange
+
     // ---- Knob-Körper ----
     inline const juce::Colour knobTop   { 0xff3b3633 };
     inline const juce::Colour knobBot   { 0xff1b1918 };

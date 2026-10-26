@@ -1,11 +1,12 @@
-KICKFORGE – Installation (Windows, FL Studio)
-=============================================
+KICKFORGE v0.7 – Installation (Windows, FL Studio)
+==================================================
 
 1) Den Ordner "Kickforge.vst3" kopieren nach:
 
      C:\Program Files\Common Files\VST3\
 
    Windows fragt nach Admin-Bestätigung – einfach bestätigen.
+   (Eine ältere Kickforge-Version dort vorher ersetzen.)
 
 2) FL Studio öffnen:
      Options  >  Manage plugins  >  "Find installed plugins"
@@ -16,9 +17,15 @@ KICKFORGE – Installation (Windows, FL Studio)
    Audio-Ausgang oben links unter "Options" einstellen,
    dann mit dem KICK-Button oder per MIDI-Keyboard spielen.
 
-Tipps
------
-- Doppelklick auf einen Knob = Standardwert
-- Werte lassen sich auch tippen: "2.5k", "120ms", "1.2s"
-- Presets: Pfeile oben links neben dem Preset-Namen
-- EXPORT WAV schreibt die aktuelle Kick als 24-Bit-WAV
+Bedienung
+---------
+- Presets: Pfeile oder Liste oben (Industrial = 150 BPM, Harsh = 160 BPM).
+  Mit HOST SYNC passt sich die Länge automatisch an das FL-Tempo an.
+- KEY = Grundton der Kick. KEY TRACK an: die gespielte Note bestimmt den Ton.
+- Eigenes Sample in eine Schicht: WAV auf CLICK / PUNCH / RUMBLE / GRIT ziehen
+  (oder LOAD). SAMPLE-Schalter = Sample statt Synthese, X = entfernen.
+- VARIATION ändert das Rauschen → gleiche Einstellung, neue Textur.
+- Doppelklick auf einen Knob = Standardwert.
+- Werte lassen sich tippen: "2.5k", "120ms", "1.2s".
+- EXPORT WAV schreibt die aktuelle Kick als 24-Bit-WAV.
+- SAVE speichert ein eigenes Preset (inkl. Sample-Pfaden).

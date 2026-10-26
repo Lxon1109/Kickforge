@@ -1,7 +1,7 @@
 # AppVeyor: kostenloser Windows-Build für öffentliche Repos
 # (Visual Studio 2022 ist auf dem Image vorinstalliert)
 
-version: 0.6.{build}
+version: 0.7.{build}
 image: Visual Studio 2022
 platform: x64
 configuration: Release

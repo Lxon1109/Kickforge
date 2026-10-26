@@ -3,16 +3,19 @@
 
 namespace T = kf::theme;
 using W = T::Weight;
+using namespace kf::params;
 
 namespace layout
 {
-    constexpr int width   = 1240;
-    constexpr int height  = 824;
+    constexpr int width   = 1320;
+    constexpr int height  = 846;
     constexpr int pad     = 14;
     constexpr int gap     = 8;
-    constexpr int vizY    = 66,  vizH    = 132;
-    constexpr int layersY = 210, layersH = 396;
-    constexpr int bottomY = 618;
+    constexpr int vizY    = 66,  vizH    = 128;
+    constexpr int layersY = 204, layersH = 428;
+    constexpr int bottomY = 640;
+    constexpr int clickW  = 204;
+    constexpr int masterW = 420;
 }
 
 // =========================================================================
@@ -30,7 +33,7 @@ KickforgeAudioProcessorEditor::makeKnob (const juce::String& id, const juce::Str
     auto& s = k->slider;
     s.setSliderStyle (Slider::RotaryHorizontalVerticalDrag);
     s.setRotaryParameters (MathConstants<float>::pi * 1.25f, MathConstants<float>::pi * 2.75f, true);
-    s.setTextBoxStyle (Slider::TextBoxBelow, false, 90, size == KnobSize::Small ? 15 : 17);
+    s.setTextBoxStyle (Slider::TextBoxBelow, false, 96, size == KnobSize::Small ? 15 : 17);
     s.setColour (Slider::rotarySliderFillColourId, accent);
     s.getProperties().set ("size", size == KnobSize::Big ? "big" : size == KnobSize::Med ? "med" : "small");
     if (bipolar) s.getProperties().set ("bipolar", true);
@@ -45,46 +48,23 @@ KickforgeAudioProcessorEditor::makeKnob (const juce::String& id, const juce::Str
     addAndMakeVisible (k->label);
 
     k->att = std::make_unique<SAtt> (proc.apvts, id, s);
-
-    // Doppelklick = Default-Wert
     if (auto* p = proc.apvts.getParameter (id))
+    {
         s.setDoubleClickReturnValue (true, p->convertFrom0to1 (p->getDefaultValue()));
+        s.setTooltip (p->getName (64));
+    }
     return k;
 }
 
-std::unique_ptr<KickforgeAudioProcessorEditor::ToggleCtrl>
+std::unique_ptr<KickforgeAudioProcessorEditor::Toggle>
 KickforgeAudioProcessorEditor::makeToggle (const juce::String& id, const juce::String& text, juce::Colour accent)
 {
-    auto t = std::make_unique<ToggleCtrl>();
+    auto t = std::make_unique<Toggle>();
     t->button.setButtonText (text);
     t->button.setColour (juce::ToggleButton::tickColourId, accent);
     addAndMakeVisible (t->button);
     t->att = std::make_unique<BAtt> (proc.apvts, id, t->button);
     return t;
-}
-
-std::unique_ptr<KickforgeAudioProcessorEditor::ChoiceCtrl>
-KickforgeAudioProcessorEditor::makeChoice (const juce::String& id, const juce::String& text, juce::Colour accent)
-{
-    using namespace juce;
-    auto c = std::make_unique<ChoiceCtrl>();
-    if (auto* p = dynamic_cast<AudioParameterChoice*> (proc.apvts.getParameter (id)))
-    {
-        int idx = 1;
-        for (auto& s : p->choices)
-            c->combo.addItem (s.toUpperCase(), idx++);
-    }
-    c->combo.setColour (ComboBox::arrowColourId, accent);
-    addAndMakeVisible (c->combo);
-
-    c->label.setText (text, dontSendNotification);
-    c->label.setJustificationType (Justification::centredLeft);
-    c->label.setFont (lnf.fonts().get (W::Bold, 10.5f, 0.14f));
-    c->label.setColour (Label::textColourId, T::dim);
-    addAndMakeVisible (c->label);
-
-    c->att = std::make_unique<CAtt> (proc.apvts, id, c->combo);
-    return c;
 }
 
 // =========================================================================
@@ -94,219 +74,262 @@ KickforgeAudioProcessorEditor::makeChoice (const juce::String& id, const juce::S
 KickforgeAudioProcessorEditor::KickforgeAudioProcessorEditor (KickforgeAudioProcessor& p)
     : AudioProcessorEditor (&p), proc (p)
 {
-    // setSize() erst ganz am Ende: es triggert resized(), das alle Komponenten braucht.
     buildBackgroundTexture();
     buildHeader();
-    buildLayerPanels();
-    buildBottomRow();
+    buildPanels();
+    addAndMakeVisible (visualizer);
 
-    addAndMakeVisible (waveform);
-
-    // LookAndFeel erst setzen, wenn alle Kinder existieren → alle bekommen es mit
     setLookAndFeel (&lnf);
     setResizable (false, false);
-    setSize (layout::width, layout::height);
+    setSize (layout::width, layout::height);   // erst am Ende: triggert resized()
 
-    renderWaveform();
+    updateSampleSlots();
+    updateTempoInfo();
+    renderVisualizer();
     startTimerHz (30);
 }
 
 KickforgeAudioProcessorEditor::~KickforgeAudioProcessorEditor()
 {
     stopTimer();
-    renderPool.removeAllJobs (false, 2000);   // laufenden Render fertig werden lassen
+    renderPool.removeAllJobs (false, 3000);
     setLookAndFeel (nullptr);
 }
 
 void KickforgeAudioProcessorEditor::buildHeader()
 {
     using namespace juce;
-
     if (auto xml = XmlDocument::parse (String::fromUTF8 (BinaryData::emblem_svg, BinaryData::emblem_svgSize)))
         emblem = Drawable::createFromSVG (*xml);
 
-    presetCombo.setTextWhenNothingSelected ("(init)");
+    presetCombo.setTextWhenNothingSelected (proc.getPresetManager().getCurrentName());
     presetCombo.setColour (ComboBox::arrowColourId, T::brand);
     addAndMakeVisible (presetCombo);
     refreshPresetCombo();
-    presetCombo.setSelectedId (proc.getPresetManager().getCurrentIndex() + 1, dontSendNotification);
     presetCombo.onChange = [this]
     {
         const int idx = presetCombo.getSelectedId() - 1;
-        if (idx >= 0 && proc.getPresetManager().loadByIndex (idx))
-            proc.getPresetManager().setCurrentIndex (idx);
+        if (idx >= 0) proc.getPresetManager().load (idx);
     };
 
-    for (auto* b : { &prevPresetBtn, &nextPresetBtn, &savePresetBtn, &exportBtn, &triggerBtn,
-                     &loadSampleBtn, &clearSampleBtn })
+    for (auto* b : { &prevPresetBtn, &nextPresetBtn, &savePresetBtn, &exportBtn, &triggerBtn })
         addAndMakeVisible (*b);
-
     triggerBtn.getProperties().set ("primary", true);
 
-    prevPresetBtn .onClick = [this] { loadSelectedPreset (-1); };
-    nextPresetBtn .onClick = [this] { loadSelectedPreset (+1); };
-    savePresetBtn .onClick = [this] { onSavePresetClicked(); };
-    exportBtn     .onClick = [this] { onExportClicked(); };
-    triggerBtn    .onClick = [this] { proc.triggerAudition(); };
-    loadSampleBtn .onClick = [this] { onLoadSampleClicked(); };
-    clearSampleBtn.onClick = [this] { onClearSampleClicked(); };
-
-    sampleNameLabel.setFont (lnf.fonts().get (W::SemiBold, 11.5f, 0.02f));
-    sampleNameLabel.setColour (Label::textColourId, T::dim);
-    sampleNameLabel.setJustificationType (Justification::centredLeft);
-    addAndMakeVisible (sampleNameLabel);
-    updateSampleLabel();
+    prevPresetBtn.onClick = [this] { stepPreset (-1); };
+    nextPresetBtn.onClick = [this] { stepPreset (+1); };
+    savePresetBtn.onClick = [this] { onSavePresetClicked(); };
+    exportBtn    .onClick = [this] { onExportClicked(); };
+    triggerBtn   .onClick = [this] { proc.triggerAudition(); };
 }
 
-void KickforgeAudioProcessorEditor::buildLayerPanels()
+void KickforgeAudioProcessorEditor::buildSampleSlot (Panel& p)
+{
+    using namespace juce;
+    const int l = p.layer;
+    p.sampleToggle = makeToggle (srcId (l), "SAMPLE", p.accent);
+
+    p.loadBtn  = std::make_unique<TextButton> ("LOAD");
+    p.clearBtn = std::make_unique<TextButton> (String::fromUTF8 ("\xe2\x9c\x95"));   // ✕
+    p.loadBtn ->setTooltip ("WAV/AIFF/FLAC laden (oder Datei auf die Schicht ziehen)");
+    p.clearBtn->setTooltip ("Sample entfernen");
+    p.loadBtn ->onClick = [this, l] { onLoadSampleClicked (l); };
+    p.clearBtn->onClick = [this, l] { proc.clearLayerSample (l); updateSampleSlots(); };
+    addAndMakeVisible (*p.loadBtn);
+    addAndMakeVisible (*p.clearBtn);
+
+    p.sampleName = std::make_unique<Label>();
+    p.sampleName->setFont (lnf.fonts().get (W::SemiBold, 11.5f, 0.02f));
+    p.sampleName->setColour (Label::textColourId, T::dim);
+    p.sampleName->setJustificationType (Justification::centredLeft);
+    p.sampleName->setMinimumHorizontalScale (0.7f);
+    addAndMakeVisible (*p.sampleName);
+
+    p.sGain  = makeKnob (sGainId (l),  "GAIN",  p.accent, KnobSize::Small);
+    p.sPitch = makeKnob (sPitchId (l), "PITCH", p.accent, KnobSize::Small, true);
+}
+
+void KickforgeAudioProcessorEditor::buildPanels()
 {
     using KS = KnobSize;
+    auto add = [this] (std::vector<std::unique_ptr<Knob>>& v, const char* id, const char* txt, juce::Colour c, KS s)
+    {
+        v.push_back (makeKnob (id, txt, c, s));
+    };
 
     // ---------- 01 CLICK ----------
-    auto& c = clickPanel;
-    c.index = "01"; c.title = "CLICK"; c.accent = T::click; c.bigCount = 2;
-    c.onToggle  = makeToggle ("click_on",   "ON",  T::click);
-    c.modeCombo = makeChoice ("click_mode", "OSC", T::click);
-    c.knobs.push_back (makeKnob ("click_tune", "TUNE",  T::click, KS::Big));
-    c.knobs.push_back (makeKnob ("click_dec",  "DECAY", T::click, KS::Big));
-    c.knobs.push_back (makeKnob ("click_drv",  "DRIVE", T::click, KS::Med));
-    c.knobs.push_back (makeKnob ("click_lvl",  "LEVEL", T::click, KS::Med));
-    c.shaperCombo     = makeChoice ("click_shp",   "SHAPE",  T::click);
-    c.filterModeCombo = makeChoice ("click_fmode", "FILTER", T::click);
-    c.filterCutKnob   = makeKnob   ("click_fcut",  "CUTOFF", T::click, KS::Small);
-    c.filterResKnob   = makeKnob   ("click_fres",  "RESO",   T::click, KS::Small);
-    c.delayKnob       = makeKnob   ("click_dly",   "DELAY",  T::click, KS::Small);
+    clickP.index = "01"; clickP.title = "CLICK"; clickP.accent = T::click; clickP.layer = 0;
+    add (clickP.big, "clickLevel",   "LEVEL", T::click, KS::Big);
+    add (clickP.med, "clickDecayMs", "DECAY", T::click, KS::Med);
+    add (clickP.med, "clickTone",    "TONE",  T::click, KS::Med);
 
-    // ---------- 02 BODY ----------
-    auto& b = bodyPanel;
-    b.index = "02"; b.title = "BODY"; b.accent = T::body; b.bigCount = 3;
-    b.modeCombo = makeChoice ("body_mode", "OSC", T::body);
-    b.knobs.push_back (makeKnob ("body_tune", "TUNE",    T::body, KS::Big));
-    b.knobs.push_back (makeKnob ("body_pamt", "PITCH",   T::body, KS::Big));
-    b.knobs.push_back (makeKnob ("body_pdec", "P.DECAY", T::body, KS::Big));
-    b.knobs.push_back (makeKnob ("body_adec", "DECAY",   T::body, KS::Med));
-    b.knobs.push_back (makeKnob ("body_drv",  "DRIVE",   T::body, KS::Med));
-    b.knobs.push_back (makeKnob ("body_lvl",  "LEVEL",   T::body, KS::Med));
-    b.shaperCombo     = makeChoice ("body_shp",   "SHAPE",  T::body);
-    b.filterModeCombo = makeChoice ("body_fmode", "FILTER", T::body);
-    b.filterCutKnob   = makeKnob   ("body_fcut",  "CUTOFF", T::body, KS::Small);
-    b.filterResKnob   = makeKnob   ("body_fres",  "RESO",   T::body, KS::Small);
-    b.delayKnob       = makeKnob   ("body_dly",   "DELAY",  T::body, KS::Small);
+    // ---------- 02 PUNCH ----------
+    auto& pu = punchP; const auto cP = T::punch;
+    pu.index = "02"; pu.title = "PUNCH"; pu.accent = cP; pu.layer = 1;
+    add (pu.big,   "punchLevel",  "LEVEL",   cP, KS::Big);
+    add (pu.big,   "punchDrive",  "DRIVE",   cP, KS::Big);
+    add (pu.big,   "punchLenMs",  "LENGTH",  cP, KS::Big);
+    add (pu.med,   "fStart",      "START",   cP, KS::Med);
+    add (pu.med,   "fMid",        "MID",     cP, KS::Med);
+    add (pu.med,   "t1Ms",        "SNAP",    cP, KS::Med);
+    add (pu.med,   "t2Ms",        "SWEEP",   cP, KS::Med);
+    add (pu.small, "punchDirt",   "DIRT",    cP, KS::Small);
+    add (pu.small, "punchAsym",   "ASYM",    cP, KS::Small);
+    add (pu.small, "punchTone",   "TONE",    cP, KS::Small);
+    add (pu.small, "punchHpFrom", "HP",      cP, KS::Small);
+    add (pu.small, "punchHpMs",   "HP TIME", cP, KS::Small);
 
-    // ---------- 03 TAIL ----------
-    auto& t = tailPanel;
-    t.index = "03"; t.title = "TAIL"; t.accent = T::tail; t.bigCount = 3;
-    t.onToggle = makeToggle ("tail_on", "ON", T::tail);
-    t.fixedOscText = juce::String::fromUTF8 ("SINE  \xc2\xb7  SUB");
-    t.knobs.push_back (makeKnob ("tail_tune", "TUNE",    T::tail, KS::Big));
-    t.knobs.push_back (makeKnob ("tail_adec", "DECAY",   T::tail, KS::Big));
-    t.knobs.push_back (makeKnob ("tail_pamt", "PITCH",   T::tail, KS::Big));
-    t.knobs.push_back (makeKnob ("tail_pdec", "P.DECAY", T::tail, KS::Med));
-    t.knobs.push_back (makeKnob ("tail_drv",  "DRIVE",   T::tail, KS::Med));
-    t.knobs.push_back (makeKnob ("tail_lvl",  "LEVEL",   T::tail, KS::Med));
-    t.shaperCombo     = makeChoice ("tail_shp",   "SHAPE",  T::tail);
-    t.filterModeCombo = makeChoice ("tail_fmode", "FILTER", T::tail);
-    t.filterCutKnob   = makeKnob   ("tail_fcut",  "CUTOFF", T::tail, KS::Small);
-    t.filterResKnob   = makeKnob   ("tail_fres",  "RESO",   T::tail, KS::Small);
-    t.delayKnob       = makeKnob   ("tail_dly",   "DELAY",  T::tail, KS::Small);
-}
+    // ---------- 03 RUMBLE ----------
+    auto& ru = rumbleP; const auto cR = T::rumble;
+    ru.index = "03"; ru.title = "RUMBLE"; ru.accent = cR; ru.layer = 2;
+    add (ru.big,   "rumbleLevel",   "LEVEL",  cR, KS::Big);
+    add (ru.big,   "rumbleDrive",   "DRIVE",  cR, KS::Big);
+    add (ru.big,   "rumbleSize",    "SIZE",   cR, KS::Big);
+    add (ru.med,   "rumbleStartMs", "START",  cR, KS::Med);
+    add (ru.med,   "rumbleFeedMs",  "FEED",   cR, KS::Med);
+    add (ru.med,   "rumbleTone",    "TONE",   cR, KS::Med);
+    add (ru.med,   "rumbleBright",  "BRIGHT", cR, KS::Med);
+    add (ru.small, "rumbleDirt",    "DIRT",   cR, KS::Small);
+    add (ru.small, "rumbleDamp",    "DAMP",   cR, KS::Small);
+    add (ru.small, "rumbleFadeMs",  "FADE",   cR, KS::Small);
 
-void KickforgeAudioProcessorEditor::buildBottomRow()
-{
-    using KS = KnobSize;
+    // ---------- 04 GRIT ----------
+    auto& gr = gritP; const auto cG = T::grit;
+    gr.index = "04"; gr.title = "GRIT"; gr.accent = cG; gr.layer = 3;
+    add (gr.big,   "gritLevel",   "LEVEL",  cG, KS::Big);
+    add (gr.big,   "gritDrive",   "DRIVE",  cG, KS::Big);
+    add (gr.big,   "gritNoise",   "NOISE",  cG, KS::Big);
+    add (gr.med,   "gritStartMs", "START",  cG, KS::Med);
+    add (gr.med,   "gritLenMs",   "LENGTH", cG, KS::Med);
+    add (gr.med,   "gritTail",    "TAIL",   cG, KS::Med);
+    add (gr.med,   "gritTone",    "TONE",   cG, KS::Med);
+    add (gr.small, "gritWidth",   "WIDTH",  cG, KS::Small);
 
-    eqOnToggle = makeToggle ("eq_on", "ON", T::fx);
-    eqKnobs.push_back (makeKnob ("eq_lo_f", "FREQ", T::fx, KS::Med));
-    eqKnobs.push_back (makeKnob ("eq_lo_g", "GAIN", T::fx, KS::Med, true));
-    eqKnobs.push_back (makeKnob ("eq_md_f", "FREQ", T::fx, KS::Med));
-    eqKnobs.push_back (makeKnob ("eq_md_g", "GAIN", T::fx, KS::Med, true));
-    eqKnobs.push_back (makeKnob ("eq_md_q", "Q",    T::fx, KS::Med));
-    eqKnobs.push_back (makeKnob ("eq_hi_f", "FREQ", T::fx, KS::Med));
-    eqKnobs.push_back (makeKnob ("eq_hi_g", "GAIN", T::fx, KS::Med, true));
+    for (auto* p : { &clickP, &punchP, &rumbleP, &gritP })
+        buildSampleSlot (*p);
 
-    reverbOnToggle = makeToggle ("rv_on", "REVERB", T::fx);
-    reverbKnobs.push_back (makeKnob ("rv_room", "ROOM", T::fx, KS::Med));
-    reverbKnobs.push_back (makeKnob ("rv_damp", "DAMP", T::fx, KS::Med));
-    reverbKnobs.push_back (makeKnob ("rv_wet",  "MIX",  T::fx, KS::Med));
+    // ---------- 05 KICK (global) ----------
+    auto& k = kickP; const auto cK = T::global;
+    k.index = "05"; k.title = "KICK"; k.accent = cK;
+    add (k.big, "fEnd",         "KEY",       cK, KS::Big);
+    add (k.big, "lengthBeats",  "LENGTH",    cK, KS::Big);
+    add (k.med, "cutMs",        "CUT",       cK, KS::Med);
+    add (k.med, "releaseMs",    "RELEASE",   cK, KS::Med);
+    add (k.med, "releaseLevel", "REL LEVEL", cK, KS::Med);
+    add (k.med, "releaseDrop",  "REL DROP",  cK, KS::Med);
+    add (k.med, "seed",         "VARIATION", cK, KS::Med);
+    add (k.med, "bpm",          "TEMPO",     cK, KS::Med);
+    syncToggle     = makeToggle (syncId,     "HOST SYNC", cK);
+    keytrackToggle = makeToggle (keytrackId, "KEY TRACK", cK);
+    syncToggle->button.setTooltip ("Kick-Länge folgt dem Tempo der DAW");
+    keytrackToggle->button.setTooltip ("Die gespielte MIDI-Note bestimmt den Grundton");
+    tempoInfo.setFont (lnf.fonts().get (W::SemiBold, 11.5f, 0.06f));
+    tempoInfo.setColour (juce::Label::textColourId, T::dim);
+    tempoInfo.setJustificationType (juce::Justification::centredLeft);
+    addAndMakeVisible (tempoInfo);
 
-    transientOnToggle = makeToggle ("tr_on", "TRANSIENT", T::master);
-    transientKnobs.push_back (makeKnob ("tr_atk", "ATTACK",  T::master, KS::Med, true));
-    transientKnobs.push_back (makeKnob ("tr_sus", "SUSTAIN", T::master, KS::Med, true));
-
-    masterKnobs.push_back (makeKnob ("master_drv",  "DRIVE",  T::master, KS::Big));
-    masterKnobs.push_back (makeKnob ("master_gain", "OUTPUT", T::master, KS::Big));
-    masterShaperCombo = makeChoice ("master_shp", "SHAPE", T::master);
-    limiterToggle     = makeToggle ("master_lim", "LIMIT",  T::master);
-    oversampleToggle  = makeToggle ("master_ovs", "OVS 2X", T::master);
+    // ---------- 06 MASTER ----------
+    auto& m = masterP; const auto cM = T::master;
+    m.index = "06"; m.title = "MASTER"; m.accent = cM;
+    add (m.big, "masterDrive",   "DRIVE",     cM, KS::Big);
+    add (m.big, "masterLowTone", "BASS TONE", cM, KS::Big);
+    add (m.big, "outGain",       "OUTPUT",    cM, KS::Big);
 }
 
 void KickforgeAudioProcessorEditor::buildBackgroundTexture()
 {
-    // Gebürsteter Stahl: horizontale Streifen + feines Rauschen, sehr dezent
     bgTexture = juce::Image (juce::Image::ARGB, 256, 256, true);
-    juce::Random rng (0x4b464f52);   // fester Seed → immer gleiche Textur
+    juce::Random rng (0x4b464f52);
     juce::Image::BitmapData bd (bgTexture, juce::Image::BitmapData::writeOnly);
     for (int y = 0; y < 256; ++y)
     {
         const float row = rng.nextFloat();
         for (int x = 0; x < 256; ++x)
-        {
-            const float v = 0.55f * row + 0.45f * rng.nextFloat();
-            bd.setPixelColour (x, y, juce::Colours::white.withAlpha (v * 0.035f));
-        }
+            bd.setPixelColour (x, y, juce::Colours::white.withAlpha ((0.55f * row + 0.45f * rng.nextFloat()) * 0.035f));
     }
 }
 
+KickforgeAudioProcessorEditor::Panel* KickforgeAudioProcessorEditor::layerPanel (int layer)
+{
+    Panel* ps[4] { &clickP, &punchP, &rumbleP, &gritP };
+    return juce::isPositiveAndBelow (layer, 4) ? ps[layer] : nullptr;
+}
+
+KickforgeAudioProcessorEditor::Panel* KickforgeAudioProcessorEditor::panelAt (juce::Point<int> pt)
+{
+    for (auto* p : { &clickP, &punchP, &rumbleP, &gritP })
+        if (p->bounds.contains (pt)) return p;
+    return nullptr;
+}
+
 // =========================================================================
-// Timer: Waveform neu rendern + Output-Meter
+// Timer
 // =========================================================================
 
 void KickforgeAudioProcessorEditor::timerCallback()
 {
     ++tickCount;
-    if (proc.pollParamsChanged())
-        waveformDirty = true;
-
-    if (waveformDirty && tickCount % 3 == 0)   // max. 10× pro Sekunde
+    const auto c = proc.getChangeCounter();
+    if (c != lastChange)
     {
-        waveformDirty = false;
-        renderWaveform();
+        lastChange = c;
+        vizDirty = true;
+        updateSampleSlots();
+        updateTempoInfo();
+        presetCombo.setTextWhenNothingSelected (proc.getPresetManager().getCurrentName());
+    }
+    if (tickCount % 15 == 0) updateTempoInfo();   // Host-Tempo kann sich ändern
+
+    if (vizDirty && tickCount % 3 == 0)
+    {
+        vizDirty = false;
+        renderVisualizer();
     }
 
     const float pk = proc.takeOutputPeak();
     meterLevel = juce::jmax (pk, meterLevel * 0.86f);
     if (pk >= meterHold) { meterHold = pk; meterHoldTicks = 36; }
     else if (--meterHoldTicks <= 0) meterHold *= 0.92f;
-
     repaint (meterBounds.expanded (4));
 }
 
-void KickforgeAudioProcessorEditor::renderWaveform()
+void KickforgeAudioProcessorEditor::renderVisualizer()
 {
-    // Läuft schon ein Render? Dann beim nächsten Tick nochmal (mit den dann aktuellen Werten).
-    if (renderInFlight.exchange (true))
-    {
-        waveformDirty = true;
-        return;
-    }
+    if (renderInFlight.exchange (true)) { vizDirty = true; return; }
 
     juce::Component::SafePointer<KickforgeAudioProcessorEditor> safe (this);
     renderPool.addJob ([this, safe]
     {
         constexpr double sr = 44100.0;
-        const int n = (int) (sr * 1.5);
-        auto parts = std::make_shared<juce::AudioBuffer<float>> (3, n);
-        auto sum   = std::make_shared<juce::AudioBuffer<float>> (1, n);
-        parts->clear();
-        sum->clear();
-        proc.renderOfflineParts (*parts, sr);
-        proc.renderOfflineKick  (*sum, sr);
+        const auto params = proc.buildParams();
+        const int len = juce::jlimit (2048, (int) (sr * 3.0), proc.kickLengthSamples (sr));
+        const int beatEnd = (int) (60.0 / juce::jmax (40.0f, params.bpm) * params.lengthBeats * sr);
 
-        juce::MessageManager::callAsync ([safe, parts, sum]
+        auto parts = std::make_shared<juce::AudioBuffer<float>> (KickVisualizer::numLayers, len);
+        auto sum   = std::make_shared<juce::AudioBuffer<float>> (1, len);
+        juce::AudioBuffer<float> st (2, len);
+
+        auto toMono = [&st, len] (float* dst)
+        {
+            const float* l = st.getReadPointer (0);
+            const float* r = st.getReadPointer (1);
+            for (int i = 0; i < len; ++i) dst[i] = 0.5f * (l[i] + r[i]);
+        };
+        proc.renderOffline (st, sr, -1);
+        toMono (sum->getWritePointer (0));
+        for (int l = 0; l < KickVisualizer::numLayers; ++l)
+        {
+            proc.renderOffline (st, sr, l);
+            toMono (parts->getWritePointer (l));
+        }
+
+        const double bpm = params.bpm;
+        const float  beats = params.lengthBeats;
+        juce::MessageManager::callAsync ([safe, parts, sum, beatEnd, bpm, beats]
         {
             if (auto* ed = safe.getComponent())
             {
-                ed->waveform.setData (*parts, *sum, sr);
+                ed->visualizer.setData (*parts, *sum, sr, beatEnd, bpm, beats);
                 ed->renderInFlight = false;
             }
         });
@@ -314,22 +337,30 @@ void KickforgeAudioProcessorEditor::renderWaveform()
 }
 
 // =========================================================================
-// Presets / Export / Sample
+// Presets / Export / Samples
 // =========================================================================
 
 void KickforgeAudioProcessorEditor::refreshPresetCombo()
 {
     presetCombo.clear (juce::dontSendNotification);
+    juce::String lastCat;
     int id = 1;
-    for (auto& n : proc.getPresetManager().getAllPresetNames())
-        presetCombo.addItem (n, id++);
+    for (auto& e : proc.getPresetManager().getEntries())
+    {
+        if (e.category != lastCat)
+        {
+            presetCombo.addSectionHeading (e.category);
+            lastCat = e.category;
+        }
+        presetCombo.addItem (e.name, id++);
+    }
 }
 
-void KickforgeAudioProcessorEditor::loadSelectedPreset (int delta)
+void KickforgeAudioProcessorEditor::stepPreset (int delta)
 {
-    const int count = presetCombo.getNumItems();
+    const int count = proc.getPresetManager().getEntries().size();
     if (count == 0) return;
-    int idx = juce::jmax (0, presetCombo.getSelectedId() - 1);
+    int idx = proc.getPresetManager().getCurrentIndex();
     idx = (idx + delta + count) % count;
     presetCombo.setSelectedId (idx + 1, juce::sendNotification);
 }
@@ -338,10 +369,8 @@ void KickforgeAudioProcessorEditor::onSavePresetClicked()
 {
     auto dir = kf::PresetManager::getUserDir();
     if (! dir.exists()) dir.createDirectory();
-
     fileChooser = std::make_unique<juce::FileChooser> (
-        juce::String::fromUTF8 ("Save Preset As\xe2\x80\xa6"), dir.getChildFile ("MyKick.kfp"), "*.kfp");
-
+        juce::String::fromUTF8 ("Preset speichern\xe2\x80\xa6"), dir.getChildFile ("Meine Kick.kfp"), "*.kfp");
     fileChooser->launchAsync (juce::FileBrowserComponent::saveMode
                             | juce::FileBrowserComponent::canSelectFiles
                             | juce::FileBrowserComponent::warnAboutOverwriting,
@@ -349,23 +378,24 @@ void KickforgeAudioProcessorEditor::onSavePresetClicked()
         {
             auto file = fc.getResult();
             if (file == juce::File()) return;
-            if (! file.hasFileExtension ("kfp"))
-                file = file.withFileExtension ("kfp");
-
-            if (auto xml = proc.apvts.copyState().createXml())
+            if (! file.hasFileExtension ("kfp")) file = file.withFileExtension ("kfp");
+            if (proc.getPresetManager().saveUserPreset (file))
             {
-                xml->writeTo (file);
                 refreshPresetCombo();
+                presetCombo.setSelectedId (proc.getPresetManager().getCurrentIndex() + 1, juce::dontSendNotification);
             }
         });
 }
 
 void KickforgeAudioProcessorEditor::onExportClicked()
 {
+    const auto params = proc.buildParams();
+    const auto name = proc.getPresetManager().getCurrentName().replaceCharacters (" #", "__")
+                    + "_" + noteName (params.fEnd).replace ("#", "s")
+                    + "_" + juce::String (juce::roundToInt (params.bpm)) + "BPM";
     auto defaultDir = juce::File::getSpecialLocation (juce::File::userDesktopDirectory);
-    fileChooser = std::make_unique<juce::FileChooser> (
-        "Export Kick as WAV", defaultDir.getChildFile ("kickforge.wav"), "*.wav");
-
+    fileChooser = std::make_unique<juce::FileChooser> ("Kick als WAV exportieren",
+                                                       defaultDir.getChildFile ("Kickforge_" + name + ".wav"), "*.wav");
     fileChooser->launchAsync (juce::FileBrowserComponent::saveMode
                             | juce::FileBrowserComponent::canSelectFiles
                             | juce::FileBrowserComponent::warnAboutOverwriting,
@@ -373,102 +403,135 @@ void KickforgeAudioProcessorEditor::onExportClicked()
         {
             auto file = fc.getResult();
             if (file == juce::File()) return;
-            if (! file.hasFileExtension ("wav"))
-                file = file.withFileExtension ("wav");
+            if (! file.hasFileExtension ("wav")) file = file.withFileExtension ("wav");
 
             constexpr double sr = 44100.0;
-            constexpr int numSamples = 44100 * 2;
+            const int n = proc.kickLengthSamples (sr);
+            juce::AudioBuffer<float> buf (2, n);
+            proc.renderOffline (buf, sr, -1);
 
-            juce::AudioBuffer<float> buf (2, numSamples);
-            buf.clear();
-            proc.renderOfflineKick (buf, sr);
-
-            juce::WavAudioFormat wav;
             file.deleteFile();
             std::unique_ptr<juce::FileOutputStream> fos (file.createOutputStream());
             if (fos == nullptr) return;
-            std::unique_ptr<juce::AudioFormatWriter> writer (
-                wav.createWriterFor (fos.get(), sr, 2u, 24, {}, 0));
+            juce::WavAudioFormat wav;
+            std::unique_ptr<juce::AudioFormatWriter> writer (wav.createWriterFor (fos.get(), sr, 2u, 24, {}, 0));
             if (writer != nullptr)
             {
-                fos.release();   // Writer besitzt jetzt den Stream
-                writer->writeFromAudioSampleBuffer (buf, 0, numSamples);
+                fos.release();
+                writer->writeFromAudioSampleBuffer (buf, 0, n);
             }
         });
 }
 
-void KickforgeAudioProcessorEditor::onLoadSampleClicked()
+void KickforgeAudioProcessorEditor::onLoadSampleClicked (int layer)
 {
-    fileChooser = std::make_unique<juce::FileChooser> (
-        "Load Click Sample",
-        juce::File::getSpecialLocation (juce::File::userDesktopDirectory),
-        "*.wav;*.aif;*.aiff;*.flac;*.mp3;*.ogg");
-
+    const auto prev = proc.getLayerSamplePath (layer);
+    const auto start = prev.isNotEmpty() ? juce::File (prev).getParentDirectory()
+                                         : juce::File::getSpecialLocation (juce::File::userDesktopDirectory);
+    fileChooser = std::make_unique<juce::FileChooser> ("Sample laden", start, "*.wav;*.aif;*.aiff;*.flac;*.ogg;*.mp3");
     fileChooser->launchAsync (juce::FileBrowserComponent::openMode | juce::FileBrowserComponent::canSelectFiles,
-        [this] (const juce::FileChooser& fc)
+        [this, layer] (const juce::FileChooser& fc)
         {
             auto file = fc.getResult();
-            if (file != juce::File() && proc.loadClickSample (file))
-                updateSampleLabel();
+            if (file != juce::File() && proc.loadLayerSample (layer, file))
+                updateSampleSlots();
         });
 }
 
-void KickforgeAudioProcessorEditor::onClearSampleClicked()
+void KickforgeAudioProcessorEditor::updateSampleSlots()
 {
-    proc.clearClickSample();
-    updateSampleLabel();
+    for (int l = 0; l < 4; ++l)
+    {
+        auto& p = *layerPanel (l);
+        const auto path = proc.getLayerSamplePath (l);
+        const bool hasSample = path.isNotEmpty();
+        const bool sampleMode = proc.apvts.getRawParameterValue (srcId (l))->load() >= 0.5f;
+        const bool active = sampleMode && hasSample;
+
+        p.sampleName->setText (hasSample ? juce::File (path).getFileNameWithoutExtension()
+                                         : (sampleMode ? juce::String ("kein Sample - Synth aktiv")
+                                                       : juce::String ("kein Sample")),
+                               juce::dontSendNotification);
+        p.sampleName->setColour (juce::Label::textColourId, active ? T::text.withAlpha (0.85f) : T::dim);
+        p.clearBtn->setEnabled (hasSample);
+
+        for (auto* v : { &p.big, &p.med, &p.small })
+            for (auto& k : *v) k->setDimmed (active);
+        p.sGain ->setDimmed (! active);
+        p.sPitch->setDimmed (! active);
+    }
 }
 
-void KickforgeAudioProcessorEditor::updateSampleLabel()
+void KickforgeAudioProcessorEditor::updateTempoInfo()
 {
-    const auto path = proc.getClickSamplePath();
-    sampleNameLabel.setText (path.isEmpty() ? juce::String ("no sample")
-                                            : juce::File (path).getFileNameWithoutExtension(),
-                             juce::dontSendNotification);
-    clearSampleBtn.setEnabled (path.isNotEmpty());
+    const bool sync = proc.apvts.getRawParameterValue (syncId)->load() >= 0.5f;
+    const double bpm = proc.getEffectiveBpm();
+    const bool fromHost = proc.isUsingHostTempo();
+    tempoInfo.setText (fromHost ? "DAW: " + juce::String (bpm, 1) + " BPM"
+                                : (sync ? juce::String ("kein DAW-Tempo, manuell") : juce::String ("manuelles Tempo")),
+                       juce::dontSendNotification);
+    kickP.med.back()->setDimmed (fromHost);   // TEMPO-Knob (letzter) gilt nur ohne DAW-Tempo
+}
+
+// =========================================================================
+// Drag & Drop
+// =========================================================================
+
+bool KickforgeAudioProcessorEditor::isInterestedInFileDrag (const juce::StringArray& files)
+{
+    for (auto& f : files)
+        if (juce::File (f).hasFileExtension ("wav;aif;aiff;flac;ogg;mp3")) return true;
+    return false;
+}
+
+void KickforgeAudioProcessorEditor::filesDropped (const juce::StringArray& files, int x, int y)
+{
+    dragPos = { -1, -1 };
+    if (auto* p = panelAt ({ x, y }))
+        for (auto& f : files)
+            if (proc.loadLayerSample (p->layer, juce::File (f))) break;
+    updateSampleSlots();
+    repaint();
 }
 
 // =========================================================================
 // Zeichnen
 // =========================================================================
 
-void KickforgeAudioProcessorEditor::drawPanel (juce::Graphics& g, juce::Rectangle<int> b,
-                                               const juce::String& index, const juce::String& title,
-                                               juce::Colour accent) const
+void KickforgeAudioProcessorEditor::drawPanel (juce::Graphics& g, const Panel& p) const
 {
     using namespace juce;
-    auto r = b.toFloat();
+    auto r = p.bounds.toFloat();
     constexpr float cut = 12.0f;
     const auto shape = T::chamferRect (r.reduced (0.5f), cut);
 
     g.setGradientFill (ColourGradient (T::panel, 0.0f, r.getY(), T::panelLo, 0.0f, r.getBottom(), false));
     g.fillPath (shape);
-
-    // Lichtkante oben + Rahmen
     g.setColour (Colours::white.withAlpha (0.045f));
     g.drawLine (r.getX() + cut + 1.0f, r.getY() + 1.5f, r.getRight() - 1.0f, r.getY() + 1.5f, 1.0f);
     g.setColour (T::edge);
     g.strokePath (shape, PathStrokeType (1.0f));
 
-    // Akzentbalken an der Abschrägung
     Path bar;
     bar.startNewSubPath (r.getX() + 1.0f, r.getY() + cut + 0.5f);
     bar.lineTo (r.getX() + cut + 0.5f, r.getY() + 1.0f);
     bar.lineTo (r.getX() + cut + 52.0f, r.getY() + 1.0f);
-    g.setColour (accent);
+    g.setColour (p.accent);
     g.strokePath (bar, PathStrokeType (2.5f, PathStrokeType::mitered, PathStrokeType::square));
 
-    // Titel: "01  CLICK"
-    auto titleArea = b.withHeight (36).withTrimmedLeft (18);
-    if (index.isNotEmpty())
-    {
-        g.setColour (T::faint);
-        g.setFont (lnf.fonts().get (W::SemiBold, 12.0f, 0.1f));
-        g.drawText (index, titleArea.removeFromLeft (24), Justification::centredLeft, false);
-    }
-    g.setColour (accent);
+    auto titleArea = p.bounds.withHeight (36).withTrimmedLeft (18);
+    g.setColour (T::faint);
+    g.setFont (lnf.fonts().get (W::SemiBold, 12.0f, 0.1f));
+    g.drawText (p.index, titleArea.removeFromLeft (24), Justification::centredLeft, false);
+    g.setColour (p.accent);
     g.setFont (lnf.fonts().get (W::Bold, 15.5f, 0.18f));
-    g.drawText (title, titleArea, Justification::centredLeft, false);
+    g.drawText (p.title, titleArea, Justification::centredLeft, false);
+
+    if (p.dividerY > 0)
+    {
+        g.setColour (T::edge);
+        g.drawHorizontalLine (p.dividerY, r.getX() + 12.0f, r.getRight() - 12.0f);
+    }
 }
 
 void KickforgeAudioProcessorEditor::drawScrew (juce::Graphics& g, juce::Point<float> c, float angle) const
@@ -485,13 +548,10 @@ void KickforgeAudioProcessorEditor::drawScrew (juce::Graphics& g, juce::Point<fl
 void KickforgeAudioProcessorEditor::drawHeader (juce::Graphics& g) const
 {
     using namespace juce;
-
-    // Emblem
     const Rectangle<float> emb (16.0f, 3.0f, 58.0f, 58.0f);
     if (emblem != nullptr)
         emblem->drawWithin (g, emb, RectanglePlacement::centred, 1.0f);
 
-    // Wordmark: KICK (Stahlweiß) + FORGE (Warnorange)
     const auto wordFont = lnf.fonts().get (W::Bold, 33.0f, 0.06f);
     const float x0    = 78.0f;
     const float kickW = GlyphArrangement::getStringWidth (wordFont, "KICK");
@@ -502,9 +562,8 @@ void KickforgeAudioProcessorEditor::drawHeader (juce::Graphics& g) const
     g.setColour (T::brand);
     g.drawText ("FORGE", Rectangle<float> (x0 + kickW, 6.0f, forgW + 4.0f, 34.0f), Justification::centredLeft, false);
 
-    // Tagline exakt so breit wie die Wordmark (Blocksatz-Lockup)
     const String tag = String::fromUTF8 ("HARDTECHNO \xc2\xb7 INDUSTRIAL \xc2\xb7 SCHRANZ");
-    const float wordW = kickW + forgW - 33.0f * 0.06f;   // letzte Laufweite abziehen
+    const float wordW = kickW + forgW - 33.0f * 0.06f;
     auto tagFont = lnf.fonts().get (W::SemiBold, 9.5f, 0.24f);
     const float tagW = GlyphArrangement::getStringWidth (tagFont, tag);
     if (tagW > 1.0f)
@@ -513,12 +572,11 @@ void KickforgeAudioProcessorEditor::drawHeader (juce::Graphics& g) const
     g.setColour (T::dim);
     g.drawText (tag, Rectangle<float> (x0 + 1.0f, 40.0f, wordW + 20.0f, 13.0f), Justification::centredLeft, false);
 
-    // Version
     g.setColour (T::faint);
     g.setFont (lnf.fonts().get (W::SemiBold, 10.0f, 0.1f));
-    g.drawText ("v0.6", Rectangle<float> (x0 + wordW + 8.0f, 12.0f, 40.0f, 12.0f), Justification::centredLeft, false);
+    g.drawText ("v" JucePlugin_VersionString, Rectangle<float> (x0 + wordW + 8.0f, 12.0f, 50.0f, 12.0f),
+                Justification::centredLeft, false);
 
-    // Preset-Display (eingelassen)
     const auto plate = T::chamferRect (presetPlate.toFloat().reduced (0.5f), 8.0f);
     g.setColour (T::recess);
     g.fillPath (plate);
@@ -533,59 +591,49 @@ void KickforgeAudioProcessorEditor::drawMeter (juce::Graphics& g) const
 {
     using namespace juce;
     if (meterBounds.isEmpty()) return;
-
     auto bar = meterBounds.toFloat();
     g.setColour (T::recess);
     g.fillRect (bar);
     g.setColour (T::edge);
     g.drawRect (bar, 1.0f);
 
-    // dB → 0..1 (-48 .. +3 dB)
     auto norm = [] (float gain)
     {
         const float db = Decibels::gainToDecibels (gain, -60.0f);
         return jlimit (0.0f, 1.0f, (db + 48.0f) / 51.0f);
     };
-
     auto inner = bar.reduced (2.0f);
     constexpr float segH = 3.0f, segGap = 1.0f;
     const int nSeg = (int) (inner.getHeight() / (segH + segGap));
     const float lit = norm (meterLevel);
     for (int i = 0; i < nSeg; ++i)
     {
-        const float pos = (float) (i + 1) / (float) nSeg;          // 0 unten … 1 oben
+        const float pos = (float) (i + 1) / (float) nSeg;
         const float y   = inner.getBottom() - (float) (i + 1) * (segH + segGap) + segGap;
         const float db  = pos * 51.0f - 48.0f;
-        const auto  col = db > -1.0f ? Colour (0xffff3b1f) : db > -12.0f ? T::brand : T::tail;
+        const auto  col = db > -1.0f ? Colour (0xffff3b1f) : db > -12.0f ? T::brand : T::rumble;
         g.setColour (pos <= lit ? col : Colour (0xff1c1a19));
         g.fillRect (inner.getX(), y, inner.getWidth(), segH);
     }
-
-    // Peak-Hold-Linie
     if (meterHold > 0.0005f)
     {
         const float y = inner.getBottom() - norm (meterHold) * inner.getHeight();
         g.setColour (T::text);
         g.fillRect (inner.getX(), y - 1.0f, inner.getWidth(), 2.0f);
     }
-
-    // Skala
     g.setFont (lnf.fonts().get (W::SemiBold, 9.5f, 0.0f));
     for (float db : { 0.0f, -12.0f, -24.0f, -48.0f })
     {
         const float y = inner.getBottom() - (db + 48.0f) / 51.0f * inner.getHeight();
         g.setColour (T::faint);
-        g.drawText (db == 0.0f ? String ("0") : String ((int) db),
-                    Rectangle<float> (bar.getX() - 26.0f, y - 6.0f, 22.0f, 12.0f),
-                    Justification::centredRight, false);
+        g.drawText (db > -0.5f ? String ("0") : String ((int) db),
+                    Rectangle<float> (bar.getX() - 26.0f, y - 6.0f, 22.0f, 12.0f), Justification::centredRight, false);
     }
 }
 
 void KickforgeAudioProcessorEditor::paint (juce::Graphics& g)
 {
     using namespace juce;
-
-    // Hintergrund: Verlauf + gebürstete Textur + Vignette oben
     g.setGradientFill (ColourGradient (T::bgTop, 0.0f, 0.0f, T::bg, 0.0f, (float) getHeight(), false));
     g.fillAll();
     g.setTiledImageFill (bgTexture, 0, 0, 1.0f);
@@ -594,7 +642,6 @@ void KickforgeAudioProcessorEditor::paint (juce::Graphics& g)
                                        Colours::transparentBlack, (float) getWidth() * 0.5f, 220.0f, true));
     g.fillRect (getLocalBounds().removeFromTop (240));
 
-    // Rack-Schrauben in den Ecken
     const float W_ = (float) getWidth(), H_ = (float) getHeight();
     drawScrew (g, { 7.0f, 7.0f }, 0.6f);
     drawScrew (g, { W_ - 7.0f, 7.0f }, 2.1f);
@@ -602,54 +649,12 @@ void KickforgeAudioProcessorEditor::paint (juce::Graphics& g)
     drawScrew (g, { W_ - 7.0f, H_ - 7.0f }, 0.2f);
 
     drawHeader (g);
-
-    // Layer-Panels
-    for (auto* p : { &clickPanel, &bodyPanel, &tailPanel })
-    {
-        drawPanel (g, p->bounds, p->index, p->title, p->accent);
-
-        // feste Oszillator-Anzeige (Tail)
-        if (p->modeCombo == nullptr && p->fixedOscText.isNotEmpty())
-        {
-            auto row = p->oscRow;
-            g.setColour (T::dim);
-            g.setFont (lnf.fonts().get (W::Bold, 10.5f, 0.14f));
-            g.drawText ("OSC", row.removeFromLeft (40), Justification::centredLeft, false);
-            g.setColour (T::text.withAlpha (0.55f));
-            g.setFont (lnf.fonts().get (W::SemiBold, 13.0f, 0.06f));
-            g.drawText (p->fixedOscText, row, Justification::centredLeft, false);
-        }
-
-        // Trennlinie zwischen Knob-Reihen und Shape/Filter
-        g.setColour (T::edge);
-        g.drawHorizontalLine (p->dividerY, (float) p->bounds.getX() + 12.0f, (float) p->bounds.getRight() - 12.0f);
-    }
-
-    // EQ / FX / Master
-    drawPanel (g, eqBounds,     "04", "MASTER EQ", T::fx);
-    drawPanel (g, fxBounds,     "05", "FX",        T::fx);
-    drawPanel (g, masterBounds, "06", "MASTER",    T::master);
-
-    // EQ-Gruppenlabels mit Klammerlinie
-    const char* groups[3] = { "LOW SHELF", "MID PEAK", "HIGH SHELF" };
-    for (int i = 0; i < 3; ++i)
-    {
-        auto r = eqGroupRects[i];
-        g.setColour (T::faint);
-        g.drawHorizontalLine (r.getCentreY(), (float) r.getX() + 4.0f, (float) r.getRight() - 4.0f);
-        g.setFont (lnf.fonts().get (W::Bold, 10.0f, 0.16f));
-        const int tw = (int) GlyphArrangement::getStringWidth (g.getCurrentFont(), groups[i]) + 12;
-        auto label = r.withSizeKeepingCentre (tw, r.getHeight());
-        g.setColour (T::panel);
-        g.fillRect (label);
-        g.setColour (T::dim);
-        g.drawText (groups[i], label, Justification::centred, false);
-    }
+    for (auto* p : { &clickP, &punchP, &rumbleP, &gritP, &kickP, &masterP })
+        drawPanel (g, *p);
 
     // Warnstreifen im Master-Titel
     {
-        auto stripe = masterBounds.withHeight (36).withTrimmedLeft (130).withTrimmedRight (18)
-                                  .withSizeKeepingCentre (56, 8).withX (masterBounds.getRight() - 18 - 56);
+        auto stripe = Rectangle<int> (masterP.bounds.getRight() - 18 - 56, masterP.bounds.getY() + 14, 56, 8);
         g.saveState();
         g.reduceClipRegion (stripe);
         g.setColour (T::master.withAlpha (0.85f));
@@ -664,8 +669,24 @@ void KickforgeAudioProcessorEditor::paint (juce::Graphics& g)
         }
         g.restoreState();
     }
-
     drawMeter (g);
+}
+
+void KickforgeAudioProcessorEditor::paintOverChildren (juce::Graphics& g)
+{
+    // Drop-Ziel beim Ziehen einer Datei hervorheben
+    if (dragPos.x < 0) return;
+    if (auto* p = panelAt (dragPos))
+    {
+        const auto r = p->bounds.toFloat().reduced (1.5f);
+        g.setColour (p->accent.withAlpha (0.10f));
+        g.fillPath (T::chamferRect (r, 12.0f));
+        g.setColour (p->accent);
+        g.strokePath (T::chamferRect (r, 12.0f), juce::PathStrokeType (2.0f));
+        g.setFont (lnf.fonts().get (W::Bold, 14.0f, 0.16f));
+        g.drawText (juce::String::fromUTF8 ("SAMPLE \xe2\x86\x92 ") + p->title, p->bounds.withTrimmedTop (36).removeFromTop (24),
+                    juce::Justification::centred, false);
+    }
 }
 
 // =========================================================================
@@ -674,104 +695,81 @@ void KickforgeAudioProcessorEditor::paint (juce::Graphics& g)
 
 void KickforgeAudioProcessorEditor::placeKnob (Knob& k, juce::Rectangle<int> cell)
 {
-    // Feste Knob-Durchmesser je Größe → gleiche Hierarchie in allen Panels
     const int knobD  = k.size == KnobSize::Big ? 78 : k.size == KnobSize::Med ? 54 : 40;
     const int labelH = k.size == KnobSize::Big ? 15 : 14;
     const int textH  = k.slider.getTextBoxHeight();
-
     const int sliderH = juce::jmin (cell.getHeight() - labelH, knobD + textH);
-    auto block = cell.withSizeKeepingCentre (cell.getWidth(), labelH + sliderH);   // vertikal zentriert
-
+    auto block = cell.withSizeKeepingCentre (cell.getWidth(), labelH + sliderH);
     k.label.setBounds (block.removeFromTop (labelH));
-    const int sliderW = juce::jmin (block.getWidth(), knobD + 34);
+    const int sliderW = juce::jmin (block.getWidth(), knobD + 40);
     k.slider.setBounds (block.withSizeKeepingCentre (sliderW, sliderH));
 }
 
-void KickforgeAudioProcessorEditor::layoutPanel (LayerPanel& p)
+void KickforgeAudioProcessorEditor::layoutRow (std::vector<std::unique_ptr<Knob>>& knobs,
+                                               juce::Rectangle<int> row, int slots)
 {
-    auto inner = p.bounds.withTrimmedTop (38).reduced (12, 8);
+    // feste Spaltenbreite → gleiche Raster über alle Panels; zentriert, wenn weniger Knobs als Slots
+    const int n = (int) knobs.size();
+    if (n == 0) return;
+    slots = juce::jmax (slots, n);
+    const int cellW = row.getWidth() / slots;
+    auto r = row.withSizeKeepingCentre (cellW * n, row.getHeight());
+    for (auto& k : knobs) placeKnob (*k, r.removeFromLeft (cellW));
+}
 
-    if (p.onToggle)
-        p.onToggle->button.setBounds (p.bounds.getRight() - 14 - 54, p.bounds.getY() + 8, 54, 20);
+void KickforgeAudioProcessorEditor::layoutSampleSlot (Panel& p, juce::Rectangle<int> area, bool stacked)
+{
+    juce::Rectangle<int> knobs;
+    if (stacked) knobs = area.removeFromBottom (72);
+    else         knobs = area.removeFromRight (124);
 
-    // OSC-Zeile
-    auto row = inner.removeFromTop (26);
-    p.oscRow = row;
-    if (p.modeCombo)
+    auto line1 = area.removeFromTop (24);
+    p.sampleToggle->button.setBounds (line1.removeFromLeft (92));
+    line1.removeFromLeft (4);
+    p.clearBtn->setBounds (line1.removeFromRight (26));
+    line1.removeFromRight (4);
+    p.loadBtn->setBounds (line1.removeFromRight (56));
+    area.removeFromTop (6);
+    p.sampleName->setBounds (area.removeFromTop (18));
+
+    const int w = knobs.getWidth() / 2;
+    placeKnob (*p.sGain,  knobs.removeFromLeft (w));
+    placeKnob (*p.sPitch, knobs);
+}
+
+void KickforgeAudioProcessorEditor::layoutLayerPanel (Panel& p)
+{
+    auto inner = p.bounds.withTrimmedTop (38).reduced (12, 6);
+    const bool narrow = p.bounds.getWidth() < 260;
+
+    layoutRow (p.big, inner.removeFromTop (108), 3);
+    inner.removeFromTop (2);
+    layoutRow (p.med, inner.removeFromTop (82), narrow ? 2 : 4);
+    inner.removeFromTop (2);
+    if (! narrow)
     {
-        const bool isClick = (&p == &clickPanel);
-        p.modeCombo->label.setBounds (row.removeFromLeft (isClick ? 34 : 40));
-        p.modeCombo->combo.setBounds (row.removeFromLeft (isClick ? 100 : 122));
-    }
-    if (&p == &clickPanel)
-    {
-        row.removeFromLeft (8);
-        loadSampleBtn.setBounds (row.removeFromLeft (56));
-        row.removeFromLeft (4);
-        clearSampleBtn.setBounds (row.removeFromLeft (26));
-        row.removeFromLeft (6);
-        sampleNameLabel.setBounds (row.withSizeKeepingCentre (row.getWidth(), 16));   // 1 Zeile → kürzen statt umbrechen
-    }
-    inner.removeFromTop (6);
-
-    // Große Knobs
-    const int nBig = juce::jmin (p.bigCount, (int) p.knobs.size());
-    auto bigRow = inner.removeFromTop (108);
-    for (int i = 0; i < nBig; ++i)
-    {
-        const int w = bigRow.getWidth() / (nBig - i);
-        placeKnob (*p.knobs[(size_t) i], bigRow.removeFromLeft (w));
-    }
-    inner.removeFromTop (6);   // Luft zwischen großen Werten und mittleren Labels
-
-    // Mittlere Knobs
-    const int nMed = (int) p.knobs.size() - nBig;
-    auto medRow = inner.removeFromTop (82);
-    for (int i = 0; i < nMed; ++i)
-    {
-        const int w = medRow.getWidth() / (nMed - i);
-        placeKnob (*p.knobs[(size_t) (nBig + i)], medRow.removeFromLeft (w));
+        layoutRow (p.small, inner.removeFromTop (70), 5);
+        inner.removeFromTop (4);
     }
 
-    inner.removeFromTop (4);
-    p.dividerY = inner.getY();
-    inner.removeFromTop (8);
-
-    // SHAPE + FILTER (Combos nebeneinander)
-    auto comboRow = inner.removeFromTop (24);
-    const int half = (comboRow.getWidth() - 10) / 2;
-    auto left  = comboRow.removeFromLeft (half);
-    comboRow.removeFromLeft (10);
-    auto right = comboRow;
-    p.shaperCombo->label.setBounds (left.removeFromLeft (48));
-    p.shaperCombo->combo.setBounds (left);
-    p.filterModeCombo->label.setBounds (right.removeFromLeft (52));
-    p.filterModeCombo->combo.setBounds (right);
-    inner.removeFromTop (6);
-
-    // Kleine Knobs: Cutoff, Reso, Delay
-    Knob* smalls[3] = { p.filterCutKnob.get(), p.filterResKnob.get(), p.delayKnob.get() };
-    auto smallRow = inner;
-    for (int i = 0; i < 3; ++i)
-    {
-        const int w = smallRow.getWidth() / (3 - i);
-        placeKnob (*smalls[i], smallRow.removeFromLeft (w));
-    }
+    // Sample-Slot unten
+    const int slotH = narrow ? 128 : 76;
+    auto slot = inner.removeFromBottom (slotH);
+    p.dividerY = slot.getY() - 8;
+    layoutSampleSlot (p, slot, narrow);
 }
 
 void KickforgeAudioProcessorEditor::resized()
 {
     using namespace layout;
-    if (masterKnobs.size() < 2 || eqKnobs.size() < 7 || reverbKnobs.size() < 3 || transientKnobs.size() < 2)
-        return;
+    if (masterP.big.size() < 3 || kickP.med.size() < 6 || gritP.sGain == nullptr) return;
 
     const int W_ = getWidth();
     const int availW = W_ - pad * 2;
 
     // ---- Header ----
-    presetPlate = { 380, 12, 486, 38 };
+    presetPlate = { 400, 12, 520, 38 };
     {
-        // [PRESET] [◀] [ Combo ] [▶]  [SAVE]
         auto r = presetPlate.reduced (6, 6).withTrimmedLeft (64);
         savePresetBtn.setBounds (r.removeFromRight (66));
         r.removeFromRight (8);
@@ -781,84 +779,47 @@ void KickforgeAudioProcessorEditor::resized()
         r.removeFromRight (4);
         presetCombo.setBounds (r);
     }
-    triggerBtn.setBounds (W_ - pad - 132, 12, 132, 38);
-    exportBtn .setBounds (W_ - pad - 132 - gap - 124, 12, 124, 38);
+    triggerBtn.setBounds (W_ - pad - 140, 12, 140, 38);
+    exportBtn .setBounds (W_ - pad - 140 - gap - 128, 12, 128, 38);
 
-    // ---- Visualizer ----
-    waveform.setBounds (pad, vizY, availW, vizH);
+    visualizer.setBounds (pad, vizY, availW, vizH);
 
-    // ---- Layer-Panels ----
-    const int lw = availW - 2 * gap;
-    const int clickW = (int) (lw * 0.29f);
-    const int bodyW  = (int) (lw * 0.40f);
-    const int tailW  = lw - clickW - bodyW;
+    // ---- Schichten ----
+    const int restW = availW - clickW - 3 * gap;
+    const int colW  = restW / 3;
     int x = pad;
-    clickPanel.bounds = { x, layersY, clickW, layersH }; x += clickW + gap;
-    bodyPanel .bounds = { x, layersY, bodyW,  layersH }; x += bodyW  + gap;
-    tailPanel .bounds = { x, layersY, tailW,  layersH };
-    layoutPanel (clickPanel);
-    layoutPanel (bodyPanel);
-    layoutPanel (tailPanel);
+    clickP .bounds = { x, layersY, clickW, layersH };              x += clickW + gap;
+    punchP .bounds = { x, layersY, colW, layersH };                x += colW + gap;
+    rumbleP.bounds = { x, layersY, colW, layersH };                x += colW + gap;
+    gritP  .bounds = { x, layersY, pad + availW - x, layersH };
+    for (auto* p : { &clickP, &punchP, &rumbleP, &gritP })
+        layoutLayerPanel (*p);
 
-    // ---- Untere Reihe ----
+    // ---- Untere Reihe: KICK | MASTER ----
     const int bottomH = getHeight() - bottomY - pad;
-    const int eqW  = (int) (lw * 0.42f);
-    const int fxW  = (int) (lw * 0.32f);
-    const int masW = lw - eqW - fxW;
-    eqBounds     = { pad,                         bottomY, eqW,  bottomH };
-    fxBounds     = { pad + eqW + gap,             bottomY, fxW,  bottomH };
-    masterBounds = { pad + eqW + fxW + 2 * gap,   bottomY, masW, bottomH };
+    kickP  .bounds = { pad, bottomY, availW - masterW - gap, bottomH };
+    masterP.bounds = { pad + availW - masterW, bottomY, masterW, bottomH };
 
-    // EQ: 3 Gruppen (2 / 3 / 2 Knobs)
     {
-        eqOnToggle->button.setBounds (eqBounds.getRight() - 14 - 54, eqBounds.getY() + 8, 54, 20);
-        auto in = eqBounds.withTrimmedTop (38).reduced (12, 8);
-        auto groupRow = in.removeFromTop (14);
-        in.removeFromTop (4);
-        const int cellW = in.getWidth() / 7;
-        const int counts[3] = { 2, 3, 2 };
-        int k = 0;
-        for (int gI = 0; gI < 3; ++gI)
-        {
-            const int gw = (gI == 2) ? in.getWidth() : cellW * counts[gI];
-            eqGroupRects[gI] = groupRow.removeFromLeft (gw);
-            auto gArea = in.removeFromLeft (gw);
-            for (int j = 0; j < counts[gI]; ++j, ++k)
-            {
-                const int w = gArea.getWidth() / (counts[gI] - j);
-                placeKnob (*eqKnobs[(size_t) k], gArea.removeFromLeft (w));
-            }
-        }
+        auto in = kickP.bounds.withTrimmedTop (38).reduced (14, 6);
+        auto toggles = in.removeFromRight (150);
+        in.removeFromRight (8);
+        auto bigArea = in.removeFromLeft (220);
+        layoutRow (kickP.big, bigArea.withSizeKeepingCentre (bigArea.getWidth(), 112), 2);
+        in.removeFromLeft (8);
+        layoutRow (kickP.med, in.withSizeKeepingCentre (in.getWidth(), 86), 6);
+
+        auto t = toggles.withSizeKeepingCentre (toggles.getWidth(), 92);
+        syncToggle->button.setBounds (t.removeFromTop (24));
+        t.removeFromTop (2);
+        tempoInfo.setBounds (t.removeFromTop (20).withTrimmedLeft (2));
+        t.removeFromTop (14);
+        keytrackToggle->button.setBounds (t.removeFromTop (24));
     }
-
-    // FX: Reverb (3) | Transient (2)
     {
-        auto in = fxBounds.withTrimmedTop (38).reduced (12, 8);
-        const int cellW = (in.getWidth() - 14) / 5;
-        auto rv = in.removeFromLeft (cellW * 3);
-        in.removeFromLeft (14);
-        auto tr = in;
-        reverbOnToggle   ->button.setBounds (rv.removeFromTop (20).withWidth (110));
-        transientOnToggle->button.setBounds (tr.removeFromTop (20).withWidth (120));
-        rv.removeFromTop (4);
-        tr.removeFromTop (4);
-        for (int i = 0; i < 3; ++i) { const int w = rv.getWidth() / (3 - i); placeKnob (*reverbKnobs[(size_t) i],    rv.removeFromLeft (w)); }
-        for (int i = 0; i < 2; ++i) { const int w = tr.getWidth() / (2 - i); placeKnob (*transientKnobs[(size_t) i], tr.removeFromLeft (w)); }
-    }
-
-    // Master: 2 große Knobs + Meter, darunter Shape + Toggles
-    {
-        auto in = masterBounds.withTrimmedTop (38).reduced (12, 8);
-        auto bottom = in.removeFromBottom (24);
-        in.removeFromBottom (6);
-        meterBounds = in.removeFromRight (14).withTrimmedTop (2);
-        in.removeFromRight (32);   // Platz für die dB-Skala
-        for (int i = 0; i < 2; ++i) { const int w = in.getWidth() / (2 - i); placeKnob (*masterKnobs[(size_t) i], in.removeFromLeft (w)); }
-
-        masterShaperCombo->label.setBounds (bottom.removeFromLeft (44));
-        masterShaperCombo->combo.setBounds (bottom.removeFromLeft (94));
-        bottom.removeFromLeft (8);
-        oversampleToggle->button.setBounds (bottom.removeFromRight (80));
-        limiterToggle   ->button.setBounds (bottom);
+        auto in = masterP.bounds.withTrimmedTop (38).reduced (14, 6);
+        meterBounds = in.removeFromRight (14).reduced (0, 4);
+        in.removeFromRight (34);
+        layoutRow (masterP.big, in.withSizeKeepingCentre (in.getWidth(), 112), 3);
     }
 }

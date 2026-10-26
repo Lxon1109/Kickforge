@@ -1,410 +1,144 @@
 #include "PluginProcessor.h"
 #include "PluginEditor.h"
 
-using APVTS = juce::AudioProcessorValueTreeState;
-using Param = juce::AudioParameterFloat;
-using Choice = juce::AudioParameterChoice;
-using Bool  = juce::AudioParameterBool;
+using namespace kf::params;
 
-// ------------------------------------------------------------------
-// Parameter-IDs — zentral, damit Processor/Editor konsistent sind.
-// Konvention: <layer>_<param>, Layer ∈ { click, body, tail }, master.
-// ------------------------------------------------------------------
-namespace pid
+// =========================================================================
+// Parameter-Beobachter: jede Änderung zählt den Change-Counter hoch
+// (der Editor rendert daraufhin den Visualizer neu)
+// =========================================================================
+struct KickforgeAudioProcessor::ParamWatcher : juce::AudioProcessorParameter::Listener
 {
-    // Click
-    constexpr auto clickOn    = "click_on";
-    constexpr auto clickMode  = "click_mode";
-    constexpr auto clickTune  = "click_tune";
-    constexpr auto clickDec   = "click_dec";
-    constexpr auto clickDrv   = "click_drv";
-    constexpr auto clickShp   = "click_shp";
-    constexpr auto clickLvl   = "click_lvl";
-    constexpr auto clickFMode = "click_fmode";
-    constexpr auto clickFCut  = "click_fcut";
-    constexpr auto clickFRes  = "click_fres";
+    explicit ParamWatcher (KickforgeAudioProcessor& p) : owner (p)
+    {
+        for (auto* prm : owner.getParameters()) prm->addListener (this);
+    }
+    ~ParamWatcher() override
+    {
+        for (auto* prm : owner.getParameters()) prm->removeListener (this);
+    }
+    void parameterValueChanged (int, float) override        { owner.changeCounter.fetch_add (1); }
+    void parameterGestureChanged (int, bool) override       {}
+    KickforgeAudioProcessor& owner;
+};
 
-    // Body
-    constexpr auto bodyMode   = "body_mode";
-    constexpr auto bodyTune   = "body_tune";
-    constexpr auto bodyPAmt   = "body_pamt";
-    constexpr auto bodyPDec   = "body_pdec";
-    constexpr auto bodyADec   = "body_adec";
-    constexpr auto bodyDrv    = "body_drv";
-    constexpr auto bodyShp    = "body_shp";
-    constexpr auto bodyLvl    = "body_lvl";
-    constexpr auto bodyFMode  = "body_fmode";
-    constexpr auto bodyFCut   = "body_fcut";
-    constexpr auto bodyFRes   = "body_fres";
-
-    // Tail
-    constexpr auto tailOn     = "tail_on";
-    constexpr auto tailTune   = "tail_tune";
-    constexpr auto tailPAmt   = "tail_pamt";
-    constexpr auto tailPDec   = "tail_pdec";
-    constexpr auto tailADec   = "tail_adec";
-    constexpr auto tailDrv    = "tail_drv";
-    constexpr auto tailShp    = "tail_shp";
-    constexpr auto tailLvl    = "tail_lvl";
-    constexpr auto tailFMode  = "tail_fmode";
-    constexpr auto tailFCut   = "tail_fcut";
-    constexpr auto tailFRes   = "tail_fres";
-
-    // Master
-    constexpr auto masterDrv  = "master_drv";
-    constexpr auto masterShp  = "master_shp";
-    constexpr auto masterGain = "master_gain";
-    constexpr auto masterLim  = "master_lim";
-    constexpr auto masterOvs  = "master_ovs";
-
-    // Master-EQ
-    constexpr auto eqOn       = "eq_on";
-    constexpr auto eqLowFreq  = "eq_lo_f";
-    constexpr auto eqLowGain  = "eq_lo_g";
-    constexpr auto eqMidFreq  = "eq_md_f";
-    constexpr auto eqMidGain  = "eq_md_g";
-    constexpr auto eqMidQ     = "eq_md_q";
-    constexpr auto eqHighFreq = "eq_hi_f";
-    constexpr auto eqHighGain = "eq_hi_g";
-
-    // Master Reverb
-    constexpr auto rvOn    = "rv_on";
-    constexpr auto rvRoom  = "rv_room";
-    constexpr auto rvDamp  = "rv_damp";
-    constexpr auto rvWet   = "rv_wet";
-
-    // Master Transient Shaper
-    constexpr auto trOn    = "tr_on";
-    constexpr auto trAtk   = "tr_atk";
-    constexpr auto trSus   = "tr_sus";
-
-    // Layer-Delays
-    constexpr auto clickDly = "click_dly";
-    constexpr auto bodyDly  = "body_dly";
-    constexpr auto tailDly  = "tail_dly";
+// =========================================================================
+// Parameter-Layout
+// =========================================================================
+static juce::AudioParameterFloatAttributes attrs (Unit u)
+{
+    return juce::AudioParameterFloatAttributes()
+        .withStringFromValueFunction ([u] (float v, int) { return format (v, u); })
+        .withValueFromStringFunction ([u] (const juce::String& s) { return parse (s, u); });
 }
 
-static const juce::StringArray kFilterNames { "Off", "LP", "HP", "BP" };
+juce::AudioProcessorValueTreeState::ParameterLayout KickforgeAudioProcessor::createParameterLayout()
+{
+    std::vector<std::unique_ptr<juce::RangedAudioParameter>> p;
 
-static const juce::StringArray kShaperNames { "Tanh", "HardClip", "Fold", "BitCrush" };
-static const juce::StringArray kOscNames    { "Sine", "Noise", "Blip", "Triangle", "Sample" };
+    for (auto& d : engineDefs())
+    {
+        juce::NormalisableRange<float> r (d.min, d.max, d.unit == Unit::Int ? 1.0f : 0.0f);
+        if (d.skewCentre > 0.0f) r.setSkewForCentre (d.skewCentre);
+        const float def = kf::PresetManager::factoryValue (0, d.id, 0.5f * (d.min + d.max));
+        p.push_back (std::make_unique<juce::AudioParameterFloat> (juce::ParameterID { d.id, 1 }, d.name, r,
+                                                                  juce::jlimit (d.min, d.max, def), attrs (d.unit)));
+    }
 
-// ------------------------------------------------------------------
+    const char* layerNames[4] { "Click", "Punch", "Rumble", "Grit" };
+    for (int l = 0; l < 4; ++l)
+    {
+        const juce::String ln (layerNames[l]);
+        p.push_back (std::make_unique<juce::AudioParameterChoice> (juce::ParameterID { srcId (l), 1 }, ln + " Source",
+                                                                   juce::StringArray { "Synth", "Sample" }, 0));
+        p.push_back (std::make_unique<juce::AudioParameterFloat> (juce::ParameterID { sGainId (l), 1 }, ln + " Sample Gain",
+                                                                  juce::NormalisableRange<float> (0.0f, 2.0f, 0.0f, 0.5f), 1.0f,
+                                                                  attrs (Unit::Gain)));
+        p.push_back (std::make_unique<juce::AudioParameterFloat> (juce::ParameterID { sPitchId (l), 1 }, ln + " Sample Pitch",
+                                                                  juce::NormalisableRange<float> (-24.0f, 24.0f, 0.01f), 0.0f,
+                                                                  attrs (Unit::Semi)));
+    }
+
+    p.push_back (std::make_unique<juce::AudioParameterBool> (juce::ParameterID { syncId, 1 },     "Tempo Sync", true));
+    p.push_back (std::make_unique<juce::AudioParameterBool> (juce::ParameterID { keytrackId, 1 }, "Key Track",  false));
+
+    return { p.begin(), p.end() };
+}
+
+// =========================================================================
 KickforgeAudioProcessor::KickforgeAudioProcessor()
     : AudioProcessor (BusesProperties().withOutput ("Output", juce::AudioChannelSet::stereo(), true)),
       apvts (*this, nullptr, "PARAMS", createParameterLayout()),
       presets (apvts)
 {
-    attachAll();
-}
-
-KickforgeAudioProcessor::~KickforgeAudioProcessor()
-{
-    detachAll();
-}
-
-// ------------------------------------------------------------------
-// Anzeige-Formatierung der Parameter (Knob-Werte, DAW-Automation)
-// ------------------------------------------------------------------
-enum class U { Pct, Hz, Ms, St, Db, Gain, Bip, Num };
-
-static juce::String fmtVal (float v, U u)
-{
-    using juce::String;
-    switch (u)
+    for (auto& d : engineDefs())
+        engineRaw.push_back (apvts.getRawParameterValue (d.id));
+    for (int l = 0; l < 4; ++l)
     {
-        case U::Pct:  return String (juce::roundToInt (v * 100.0f)) + " %";
-        case U::Hz:   return v >= 1000.0f ? String (v / 1000.0f, v >= 10000.0f ? 1 : 2) + " kHz"
-                                          : String (v, v < 100.0f ? 1 : 0) + " Hz";
-        case U::Ms:   return v >= 1000.0f ? String (v / 1000.0f, 2) + " s"
-                                          : String (v, v < 100.0f ? 1 : 0) + " ms";
-        case U::St:   return String (v, 1) + " st";
-        case U::Db:   return (v > 0.05f ? "+" : "") + String (v, 1) + " dB";
-        case U::Gain: return v <= 0.0001f ? String ("-inf dB")
-                                          : String (juce::Decibels::gainToDecibels (v), 1) + " dB";
-        case U::Bip:  return (v > 0.005f ? "+" : "") + String (juce::roundToInt (v * 100.0f)) + " %";
-        case U::Num:  return String (v, 2);
+        srcRaw[l]    = apvts.getRawParameterValue (srcId (l));
+        sGainRaw[l]  = apvts.getRawParameterValue (sGainId (l));
+        sPitchRaw[l] = apvts.getRawParameterValue (sPitchId (l));
     }
-    return String (v, 2);
+    syncRaw     = apvts.getRawParameterValue (syncId);
+    keytrackRaw = apvts.getRawParameterValue (keytrackId);
+
+    presets.getStateXml = [this] { return createStateXml(); };
+    presets.setStateXml = [this] (const juce::XmlElement& x) { applyStateXml (x); };
+
+    watcher = std::make_unique<ParamWatcher> (*this);
 }
 
-static float parseVal (const juce::String& txt, U u)
+KickforgeAudioProcessor::~KickforgeAudioProcessor() = default;
+
+// =========================================================================
+// Parameter → Engine
+// =========================================================================
+double KickforgeAudioProcessor::getEffectiveBpm() const
 {
-    auto t = txt.trim().toLowerCase();
-    float v = t.retainCharacters ("0123456789.-+").getFloatValue();
-    if (u == U::Hz && t.contains ("k"))                       v *= 1000.0f;
-    if (u == U::Ms && t.endsWith ("s") && ! t.contains ("ms")) v *= 1000.0f;
-    if (u == U::Pct || u == U::Bip)                           v /= 100.0f;
-    if (u == U::Gain)                                         v = juce::Decibels::decibelsToGain (v);
-    return v;
+    const double host = hostBpm.load();
+    if (syncRaw->load() >= 0.5f && host > 20.0)
+        return host;
+    for (size_t i = 0; i < engineDefs().size(); ++i)
+        if (engineDefs()[i].field == &kf::IndustrialParams::bpm)
+            return engineRaw[i]->load();
+    return 150.0;
 }
 
-static std::unique_ptr<juce::AudioParameterFloat> fp (const char* id, const char* name,
-                                                      juce::NormalisableRange<float> range,
-                                                      float def, U u)
+kf::IndustrialParams KickforgeAudioProcessor::buildParams() const
 {
-    return std::make_unique<juce::AudioParameterFloat> (
-        juce::ParameterID { id, 1 }, name, range, def,
-        juce::AudioParameterFloatAttributes()
-            .withStringFromValueFunction ([u] (float v, int) { return fmtVal (v, u); })
-            .withValueFromStringFunction ([u] (const juce::String& s) { return parseVal (s, u); }));
-}
-
-APVTS::ParameterLayout KickforgeAudioProcessor::createParameterLayout()
-{
-    std::vector<std::unique_ptr<juce::RangedAudioParameter>> p;
-
-    auto hzRange   = juce::NormalisableRange<float>(20.0f, 8000.0f, 0.1f, 0.3f);
-    auto subRange  = juce::NormalisableRange<float>(20.0f, 200.0f, 0.1f, 0.4f);
-    auto decShort  = juce::NormalisableRange<float>(1.0f, 500.0f, 0.1f, 0.4f);
-    auto decLong   = juce::NormalisableRange<float>(10.0f, 2500.0f, 1.0f, 0.4f);
-    auto zeroOne   = juce::NormalisableRange<float>(0.0f, 1.0f, 0.001f);
-    auto semiRange = juce::NormalisableRange<float>(0.0f, 60.0f, 0.1f);
-    auto gainRange = juce::NormalisableRange<float>(0.0f, 2.0f, 0.001f, 0.5f);
-    auto fCutRange = juce::NormalisableRange<float>(20.0f, 18000.0f, 0.1f, 0.3f);
-    auto fResRange = juce::NormalisableRange<float>(0.1f, 20.0f, 0.01f, 0.3f);
-
-    // ---- Click ----
-    p.push_back (std::make_unique<Bool>  (juce::ParameterID{pid::clickOn,1},   "Click On", true));
-    p.push_back (std::make_unique<Choice>(juce::ParameterID{pid::clickMode,1}, "Click Mode", kOscNames, 1));
-    p.push_back (fp (pid::clickTune, "Click Tune", hzRange, 2500.0f, U::Hz));
-    p.push_back (fp (pid::clickDec, "Click Decay", juce::NormalisableRange<float>(1.0f,500.0f,0.1f,0.3f), 8.0f, U::Ms));
-    p.push_back (fp (pid::clickDrv, "Click Drive", zeroOne, 0.4f, U::Pct));
-    p.push_back (std::make_unique<Choice>(juce::ParameterID{pid::clickShp,1},  "Click Shaper", kShaperNames, 1));
-    p.push_back (fp (pid::clickLvl, "Click Level", zeroOne, 0.6f, U::Pct));
-    p.push_back (std::make_unique<Choice>(juce::ParameterID{pid::clickFMode,1},"Click Filter", kFilterNames, 2)); // Default HP
-    p.push_back (fp (pid::clickFCut, "Click F.Cut", fCutRange, 300.0f, U::Hz));
-    p.push_back (fp (pid::clickFRes, "Click F.Res", fResRange, 0.707f, U::Num));
-
-    // ---- Body ----
-    p.push_back (std::make_unique<Choice>(juce::ParameterID{pid::bodyMode,1}, "Body Mode", kOscNames, 0));
-    p.push_back (fp (pid::bodyTune, "Body Tune", subRange, 55.0f, U::Hz));
-    p.push_back (fp (pid::bodyPAmt, "Body P.Amt", semiRange, 36.0f, U::St));
-    p.push_back (fp (pid::bodyPDec, "Body P.Dec", decShort, 40.0f, U::Ms));
-    p.push_back (fp (pid::bodyADec, "Body A.Dec", decLong, 320.0f, U::Ms));
-    p.push_back (fp (pid::bodyDrv, "Body Drive", zeroOne, 0.45f, U::Pct));
-    p.push_back (std::make_unique<Choice>(juce::ParameterID{pid::bodyShp,1},  "Body Shaper", kShaperNames, 1));
-    p.push_back (fp (pid::bodyLvl, "Body Level", zeroOne, 1.0f, U::Pct));
-    p.push_back (std::make_unique<Choice>(juce::ParameterID{pid::bodyFMode,1},"Body Filter", kFilterNames, 0));
-    p.push_back (fp (pid::bodyFCut, "Body F.Cut", fCutRange, 2000.0f, U::Hz));
-    p.push_back (fp (pid::bodyFRes, "Body F.Res", fResRange, 0.707f, U::Num));
-
-    // ---- Tail ----
-    p.push_back (std::make_unique<Bool>  (juce::ParameterID{pid::tailOn,1},   "Tail On", true));
-    p.push_back (fp (pid::tailTune, "Tail Tune", subRange, 42.0f, U::Hz));
-    p.push_back (fp (pid::tailPAmt, "Tail P.Amt", juce::NormalisableRange<float>(0.0f,24.0f,0.1f), 4.0f, U::St));
-    p.push_back (fp (pid::tailPDec, "Tail P.Dec", decShort, 120.0f, U::Ms));
-    p.push_back (fp (pid::tailADec, "Tail A.Dec", decLong, 900.0f, U::Ms));
-    p.push_back (fp (pid::tailDrv, "Tail Drive", zeroOne, 0.1f, U::Pct));
-    p.push_back (std::make_unique<Choice>(juce::ParameterID{pid::tailShp,1},  "Tail Shaper", kShaperNames, 0));
-    p.push_back (fp (pid::tailLvl, "Tail Level", zeroOne, 0.7f, U::Pct));
-    p.push_back (std::make_unique<Choice>(juce::ParameterID{pid::tailFMode,1},"Tail Filter", kFilterNames, 1)); // Default LP
-    p.push_back (fp (pid::tailFCut, "Tail F.Cut", fCutRange, 180.0f, U::Hz));
-    p.push_back (fp (pid::tailFRes, "Tail F.Res", fResRange, 0.707f, U::Num));
-
-    // ---- Master ----
-    p.push_back (fp (pid::masterDrv, "Master Drive", zeroOne, 0.25f, U::Pct));
-    p.push_back (std::make_unique<Choice>(juce::ParameterID{pid::masterShp,1},  "Master Shaper", kShaperNames, 1));
-    p.push_back (fp (pid::masterGain, "Master Gain", gainRange, 0.9f, U::Gain));
-    p.push_back (std::make_unique<Bool>  (juce::ParameterID{pid::masterLim,1},  "Limiter", true));
-    p.push_back (std::make_unique<Bool>  (juce::ParameterID{pid::masterOvs,1},  "Oversample 2x", true));
-
-    // ---- Master EQ ----
-    auto eqFreqLow  = juce::NormalisableRange<float>(20.0f, 500.0f,  0.1f, 0.5f);
-    auto eqFreqMid  = juce::NormalisableRange<float>(100.0f, 8000.0f,0.1f, 0.3f);
-    auto eqFreqHigh = juce::NormalisableRange<float>(1000.0f, 18000.0f, 1.0f, 0.3f);
-    auto eqGainRng  = juce::NormalisableRange<float>(-18.0f, 18.0f, 0.01f);
-    auto eqQRng     = juce::NormalisableRange<float>(0.3f, 8.0f, 0.01f, 0.4f);
-
-    p.push_back (std::make_unique<Bool>  (juce::ParameterID{pid::eqOn,1},      "EQ On", true));
-    p.push_back (fp (pid::eqLowFreq, "EQ Low F", eqFreqLow, 80.0f, U::Hz));
-    p.push_back (fp (pid::eqLowGain, "EQ Low G", eqGainRng, 0.0f, U::Db));
-    p.push_back (fp (pid::eqMidFreq, "EQ Mid F", eqFreqMid, 800.0f, U::Hz));
-    p.push_back (fp (pid::eqMidGain, "EQ Mid G", eqGainRng, 0.0f, U::Db));
-    p.push_back (fp (pid::eqMidQ, "EQ Mid Q", eqQRng, 0.707f, U::Num));
-    p.push_back (fp (pid::eqHighFreq, "EQ High F", eqFreqHigh, 6000.0f, U::Hz));
-    p.push_back (fp (pid::eqHighGain, "EQ High G", eqGainRng, 0.0f, U::Db));
-
-    // ---- Master Reverb ----
-    p.push_back (std::make_unique<Bool>  (juce::ParameterID{pid::rvOn,1},   "Reverb On", false));
-    p.push_back (fp (pid::rvRoom, "Rev Room", zeroOne, 0.5f, U::Pct));
-    p.push_back (fp (pid::rvDamp, "Rev Damp", zeroOne, 0.5f, U::Pct));
-    p.push_back (fp (pid::rvWet, "Rev Wet", zeroOne, 0.2f, U::Pct));
-
-    // ---- Master Transient Shaper ----
-    auto bipolar = juce::NormalisableRange<float>(-1.0f, 1.0f, 0.001f);
-    p.push_back (std::make_unique<Bool>  (juce::ParameterID{pid::trOn,1},  "Trans On",  false));
-    p.push_back (fp (pid::trAtk, "Trans Atk", bipolar, 0.0f, U::Bip));
-    p.push_back (fp (pid::trSus, "Trans Sus", bipolar, 0.0f, U::Bip));
-
-    // ---- Layer-Delays (0..100 ms) ----
-    auto dlyRng = juce::NormalisableRange<float>(0.0f, 100.0f, 0.1f);
-    p.push_back (fp (pid::clickDly, "Click Delay", dlyRng, 0.0f, U::Ms));
-    p.push_back (fp (pid::bodyDly, "Body Delay", dlyRng, 0.0f, U::Ms));
-    p.push_back (fp (pid::tailDly, "Tail Delay", dlyRng, 0.0f, U::Ms));
-
-    return { p.begin(), p.end() };
-}
-
-void KickforgeAudioProcessor::attachAll()
-{
-    for (auto* p : getParameters())
+    kf::IndustrialParams p;
+    const auto& defs = engineDefs();
+    for (size_t i = 0; i < defs.size(); ++i)
+        p.*(defs[i].field) = engineRaw[i]->load();
+    p.bpm = (float) getEffectiveBpm();
+    for (int l = 0; l < 4; ++l)
     {
-        if (auto* rp = dynamic_cast<juce::RangedAudioParameter*>(p))
-            apvts.addParameterListener (rp->getParameterID(), this);
+        p.layerMode[l]       = srcRaw[l]->load();
+        p.sampleGain[l]      = sGainRaw[l]->load();
+        p.samplePitchSemi[l] = sPitchRaw[l]->load();
     }
-    // Beim Start einmal alles sync'en (beide voices)
-    for (auto* p : getParameters())
+    return p;
+}
+
+int KickforgeAudioProcessor::kickLengthSamples (double sampleRate) const
+{
+    const auto p = buildParams();
+    const double sec = 60.0 / juce::jmax (40.0f, p.bpm) * p.lengthBeats
+                     + (p.releaseMs > 0.5f ? 7.0 * p.releaseMs * 0.001 : 0.0) + 0.02;
+    return (int) std::ceil (sec * sampleRate);
+}
+
+// =========================================================================
+// Audio
+// =========================================================================
+void KickforgeAudioProcessor::prepareToPlay (double sampleRate, int samplesPerBlock)
+{
+    engine.prepare (sampleRate, samplesPerBlock);
+    monoScratch.assign ((size_t) juce::jmax (samplesPerBlock, 32), 0.0f);
+    for (int l = 0; l < 4; ++l)
     {
-        if (auto* rp = dynamic_cast<juce::RangedAudioParameter*>(p))
-            syncParamToEngine (rp->getParameterID(),
-                               *apvts.getRawParameterValue (rp->getParameterID()),
-                               true);
-    }
-}
-
-void KickforgeAudioProcessor::detachAll()
-{
-    for (auto* p : getParameters())
-        if (auto* rp = dynamic_cast<juce::RangedAudioParameter*>(p))
-            apvts.removeParameterListener (rp->getParameterID(), this);
-}
-
-void KickforgeAudioProcessor::parameterChanged (const juce::String& id, float v)
-{
-    syncParamToEngine (id, v, true);
-    paramsChanged.store (true);
-}
-
-void KickforgeAudioProcessor::syncParamToEngine (const juce::String& id, float v, bool toBothVoices)
-{
-    auto apply = [&id, v] (kf::KickVoice& vc)
-    {
-        auto& C = vc.click();
-        auto& B = vc.body();
-        auto& T = vc.tail();
-        auto& E = vc.eq();
-
-        if      (id == pid::clickOn)    C.setMute (v < 0.5f);
-        else if (id == pid::clickMode)  C.setMode ((int) v);
-        else if (id == pid::clickTune)  C.setTune (v);
-        else if (id == pid::clickDec)   C.setAmpDecay (v);
-        else if (id == pid::clickDrv)   C.setDrive (v);
-        else if (id == pid::clickShp)   C.setShaper ((int) v);
-        else if (id == pid::clickLvl)   C.setLevel (v);
-        else if (id == pid::clickFMode) C.setFilterMode ((int) v);
-        else if (id == pid::clickFCut)  C.setFilterCutoff (v);
-        else if (id == pid::clickFRes)  C.setFilterReso (v);
-
-        else if (id == pid::bodyMode)   B.setMode ((int) v);
-        else if (id == pid::bodyTune)   B.setTune (v);
-        else if (id == pid::bodyPAmt)   B.setPitchAmount (v);
-        else if (id == pid::bodyPDec)   B.setPitchDecay (v);
-        else if (id == pid::bodyADec)   B.setAmpDecay (v);
-        else if (id == pid::bodyDrv)    B.setDrive (v);
-        else if (id == pid::bodyShp)    B.setShaper ((int) v);
-        else if (id == pid::bodyLvl)    B.setLevel (v);
-        else if (id == pid::bodyFMode)  B.setFilterMode ((int) v);
-        else if (id == pid::bodyFCut)   B.setFilterCutoff (v);
-        else if (id == pid::bodyFRes)   B.setFilterReso (v);
-
-        else if (id == pid::tailOn)     T.setMute (v < 0.5f);
-        else if (id == pid::tailTune)   T.setTune (v);
-        else if (id == pid::tailPAmt)   T.setPitchAmount (v);
-        else if (id == pid::tailPDec)   T.setPitchDecay (v);
-        else if (id == pid::tailADec)   T.setAmpDecay (v);
-        else if (id == pid::tailDrv)    T.setDrive (v);
-        else if (id == pid::tailShp)    T.setShaper ((int) v);
-        else if (id == pid::tailLvl)    T.setLevel (v);
-        else if (id == pid::tailFMode)  T.setFilterMode ((int) v);
-        else if (id == pid::tailFCut)   T.setFilterCutoff (v);
-        else if (id == pid::tailFRes)   T.setFilterReso (v);
-
-        else if (id == pid::masterDrv)  vc.setMasterDrive (v);
-        else if (id == pid::masterShp)  vc.setMasterShaper ((int) v);
-        else if (id == pid::masterGain) vc.setMasterGain (v);
-        else if (id == pid::masterLim)  vc.setLimiterOn (v >= 0.5f);
-        else if (id == pid::masterOvs)  vc.setOversampleOn (v >= 0.5f);
-
-        else if (id == pid::eqOn)       E.setOn (v >= 0.5f);
-        else if (id == pid::eqLowFreq)  E.setLowFreq (v);
-        else if (id == pid::eqLowGain)  E.setLowGain (v);
-        else if (id == pid::eqMidFreq)  E.setMidFreq (v);
-        else if (id == pid::eqMidGain)  E.setMidGain (v);
-        else if (id == pid::eqMidQ)     E.setMidQ (v);
-        else if (id == pid::eqHighFreq) E.setHighFreq (v);
-        else if (id == pid::eqHighGain) E.setHighGain (v);
-
-        else if (id == pid::rvOn)       vc.reverb().setOn (v >= 0.5f);
-        else if (id == pid::rvRoom)     vc.reverb().setRoomSize (v);
-        else if (id == pid::rvDamp)     vc.reverb().setDamping (v);
-        else if (id == pid::rvWet)      vc.reverb().setWet (v);
-
-        else if (id == pid::trOn)       vc.transient().setOn (v >= 0.5f);
-        else if (id == pid::trAtk)      vc.transient().setAttack (v);
-        else if (id == pid::trSus)      vc.transient().setSustain (v);
-
-        else if (id == pid::clickDly)   C.setDelayMs (v);
-        else if (id == pid::bodyDly)    B.setDelayMs (v);
-        else if (id == pid::tailDly)    T.setDelayMs (v);
-    };
-
-    apply (voice);
-    if (toBothVoices)
-        apply (offlineVoice);
-}
-
-void KickforgeAudioProcessor::prepareToPlay (double sampleRate, int blockSize)
-{
-    voice.prepare (sampleRate, blockSize);
-    // Offline-Voice wird on-demand mit der jeweiligen SR in renderOfflineKick geprepared.
-}
-
-void KickforgeAudioProcessor::renderOfflineKick (juce::AudioBuffer<float>& out, double sampleRate)
-{
-    // Offline-Voice für diese Sample-Rate frisch prepare+reset, dann
-    // triggern und in den Buffer schreiben. Keine Race mit der Live-Voice.
-    const juce::ScopedLock sl (offlineLock);
-    const int numSamples = out.getNumSamples();
-    const int blockSize  = juce::jmin (1024, numSamples);
-
-    offlineVoice.prepare (sampleRate, blockSize);
-    offlineVoice.reset();
-    offlineVoice.trigger (0.95f);
-
-    auto* data = out.getWritePointer (0);
-    int remaining = numSamples;
-    int offset = 0;
-    while (remaining > 0)
-    {
-        const int chunk = juce::jmin (blockSize, remaining);
-        offlineVoice.render (data + offset, chunk);
-        remaining -= chunk;
-        offset    += chunk;
-    }
-
-    // Stereo kopieren falls gewünscht
-    for (int ch = 1; ch < out.getNumChannels(); ++ch)
-        out.copyFrom (ch, 0, out.getReadPointer (0), numSamples);
-}
-
-void KickforgeAudioProcessor::renderOfflineParts (juce::AudioBuffer<float>& parts, double sampleRate)
-{
-    jassert (parts.getNumChannels() >= 3);
-    const juce::ScopedLock sl (offlineLock);
-    const int numSamples = parts.getNumSamples();
-    const int blockSize  = juce::jmin (1024, numSamples);
-
-    offlineVoice.prepare (sampleRate, blockSize);
-    offlineVoice.reset();
-    offlineVoice.trigger (0.95f);
-
-    for (int off = 0; off < numSamples; off += blockSize)
-    {
-        const int chunk = juce::jmin (blockSize, numSamples - off);
-        offlineVoice.renderParts (parts.getWritePointer (0) + off,
-                                  parts.getWritePointer (1) + off,
-                                  parts.getWritePointer (2) + off, chunk);
+        const juce::SpinLock::ScopedLockType sl (samplesLock);
+        engine.setLayerSample (l, layerSamples[l]);
     }
 }
 
@@ -414,112 +148,222 @@ bool KickforgeAudioProcessor::isBusesLayoutSupported (const BusesLayout& layouts
     return out == juce::AudioChannelSet::mono() || out == juce::AudioChannelSet::stereo();
 }
 
-void KickforgeAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer,
-                                            juce::MidiBuffer& midi)
+void KickforgeAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::MidiBuffer& midi)
 {
     juce::ScopedNoDenormals noDenormals;
-    buffer.clear();
+    const int n = buffer.getNumSamples();
+    if (n <= 0) return;
 
-    const int numSamples = buffer.getNumSamples();
-    auto* left = buffer.getWritePointer (0);
+    if (auto* ph = getPlayHead())
+        if (auto pos = ph->getPosition())
+            if (auto bpm = pos->getBpm())
+                hostBpm.store (*bpm);
 
+    engine.setParams (buildParams());
+
+    float* L = buffer.getWritePointer (0);
+    float* R = nullptr;
+    if (buffer.getNumChannels() > 1)
+        R = buffer.getWritePointer (1);
+    else
+    {
+        if ((int) monoScratch.size() < n) monoScratch.resize ((size_t) n);   // nur wenn der Host größere Blöcke schickt
+        R = monoScratch.data();
+    }
+
+    int pos = 0;
+    auto renderTo = [&] (int end)
+    {
+        end = juce::jlimit (0, n, end);
+        if (end > pos) { engine.render (L + pos, R + pos, end - pos); pos = end; }
+    };
+
+    if (auditionPending.exchange (false))
+        engine.trigger (1.0f);
+
+    const bool keytrack = keytrackRaw->load() >= 0.5f;
     for (const auto meta : midi)
     {
         const auto msg = meta.getMessage();
-        if (msg.isNoteOn())
-            voice.trigger (msg.getFloatVelocity());
+        if (! msg.isNoteOn()) continue;
+        renderTo (meta.samplePosition);
+        float hz = 0.0f;
+        if (keytrack)
+        {
+            hz = (float) juce::MidiMessage::getMidiNoteInHertz (msg.getNoteNumber());
+            while (hz >= 80.0f) hz *= 0.5f;      // in den Kick-Bereich 40..80 Hz falten
+            while (hz < 40.0f)  hz *= 2.0f;
+        }
+        engine.trigger (msg.getFloatVelocity(), hz);
     }
+    renderTo (n);
 
-    if (auditionPending.exchange (false))
-        voice.trigger (0.9f);
+    if (buffer.getNumChannels() == 1)
+        for (int i = 0; i < n; ++i) L[i] = 0.5f * (L[i] + R[i]);
+    for (int ch = 2; ch < buffer.getNumChannels(); ++ch)
+        buffer.clear (ch, 0, n);
 
-    voice.render (left, numSamples);
+    const float pk = buffer.getMagnitude (0, n);
+    if (pk > outputPeak.load()) outputPeak.store (pk);
+}
 
-    // Peak für die Output-Anzeige (GUI liest per Timer, eigener Abfall dort)
-    const float blockPeak = buffer.getMagnitude (0, 0, numSamples);
-    if (blockPeak > outputPeak.load())
-        outputPeak.store (blockPeak);
+// =========================================================================
+// Offline-Render (Visualizer + Export)
+// =========================================================================
+void KickforgeAudioProcessor::renderOffline (juce::AudioBuffer<float>& out, double sampleRate, int soloLayer)
+{
+    const juce::ScopedLock sl (offlineLock);
+    constexpr int block = 512;
+    if (std::abs (offlineSr - sampleRate) > 0.5)
+    {
+        offlineEngine.prepare (sampleRate, block);
+        offlineSr = sampleRate;
+    }
+    {
+        const juce::SpinLock::ScopedLockType ssl (samplesLock);
+        for (int l = 0; l < 4; ++l) offlineEngine.setLayerSample (l, layerSamples[l]);
+    }
+    offlineEngine.reset();
+    offlineEngine.setParams (buildParams());
+    offlineEngine.setLayerSolo (soloLayer);
+    offlineEngine.trigger (1.0f);
 
-    if (buffer.getNumChannels() > 1)
-        buffer.copyFrom (1, 0, left, numSamples);
+    out.clear();
+    const int n = out.getNumSamples();
+    float* L = out.getWritePointer (0);
+    std::vector<float> tmp;
+    float* R = out.getNumChannels() > 1 ? out.getWritePointer (1) : (tmp.resize ((size_t) n), tmp.data());
+    for (int off = 0; off < n; off += block)
+        offlineEngine.render (L + off, R + off, juce::jmin (block, n - off));
+}
+
+// =========================================================================
+// Sample-Slots
+// =========================================================================
+void KickforgeAudioProcessor::setParamValue (const juce::String& id, float value)
+{
+    if (auto* p = apvts.getParameter (id))
+        p->setValueNotifyingHost (p->convertTo0to1 (value));
+}
+
+bool KickforgeAudioProcessor::loadLayerSampleInternal (int layer, const juce::File& file, bool switchToSample)
+{
+    if (! juce::isPositiveAndBelow (layer, 4)) return false;
+    juce::AudioFormatManager fm;
+    fm.registerBasicFormats();
+    std::unique_ptr<juce::AudioFormatReader> reader (fm.createReaderFor (file));
+    if (reader == nullptr || reader->lengthInSamples <= 0) return false;
+
+    // bis zu 4 Sekunden, Stereo (Mono wird dupliziert)
+    const int len = (int) juce::jmin ((juce::int64) (reader->sampleRate * 4.0), reader->lengthInSamples);
+    auto s = std::make_shared<kf::LayerSample>();
+    s->sampleRate = reader->sampleRate;
+    s->buffer.setSize (2, len);
+    reader->read (&s->buffer, 0, len, 0, true, true);
+    if (reader->numChannels == 1)
+        s->buffer.copyFrom (1, 0, s->buffer, 0, 0, len);
+
+    {
+        const juce::SpinLock::ScopedLockType sl (samplesLock);
+        layerSamples[layer] = s;
+        layerSamplePaths[layer] = file.getFullPathName();
+    }
+    engine.setLayerSample (layer, s);
+    if (switchToSample) setParamValue (srcId (layer), 1.0f);
+    changeCounter.fetch_add (1);
+    return true;
+}
+
+bool KickforgeAudioProcessor::loadLayerSample (int layer, const juce::File& file)
+{
+    return loadLayerSampleInternal (layer, file, true);
+}
+
+void KickforgeAudioProcessor::clearLayerSample (int layer)
+{
+    if (! juce::isPositiveAndBelow (layer, 4)) return;
+    {
+        const juce::SpinLock::ScopedLockType sl (samplesLock);
+        layerSamples[layer].reset();
+        layerSamplePaths[layer].clear();
+    }
+    engine.setLayerSample (layer, nullptr);
+    setParamValue (srcId (layer), 0.0f);
+    changeCounter.fetch_add (1);
+}
+
+juce::String KickforgeAudioProcessor::getLayerSamplePath (int layer) const
+{
+    const juce::SpinLock::ScopedLockType sl (samplesLock);
+    return juce::isPositiveAndBelow (layer, 4) ? layerSamplePaths[layer] : juce::String();
+}
+
+// =========================================================================
+// Zustand
+// =========================================================================
+std::unique_ptr<juce::XmlElement> KickforgeAudioProcessor::createStateXml()
+{
+    auto root = std::make_unique<juce::XmlElement> ("KickforgeState");
+    root->setAttribute ("version", JucePlugin_VersionString);
+    if (auto params = apvts.copyState().createXml())
+        root->addChildElement (params.release());
+    auto* samples = root->createNewChildElement ("Samples");
+    for (int l = 0; l < 4; ++l)
+    {
+        const auto path = getLayerSamplePath (l);
+        if (path.isNotEmpty())
+        {
+            auto* e = samples->createNewChildElement ("Layer");
+            e->setAttribute ("name", layerKey (l));
+            e->setAttribute ("path", path);
+        }
+    }
+    return root;
+}
+
+void KickforgeAudioProcessor::applyStateXml (const juce::XmlElement& xml)
+{
+    if (! xml.hasTagName ("KickforgeState")) return;
+    if (auto* params = xml.getChildByName (apvts.state.getType()))
+        apvts.replaceState (juce::ValueTree::fromXml (*params));
+
+    for (int l = 0; l < 4; ++l)
+    {
+        juce::String path;
+        if (auto* samples = xml.getChildByName ("Samples"))
+            for (auto* e : samples->getChildIterator())
+                if (e->getStringAttribute ("name") == layerKey (l))
+                    path = e->getStringAttribute ("path");
+
+        const juce::File f (path);
+        if (path.isNotEmpty() && f.existsAsFile())
+            loadLayerSampleInternal (l, f, false);   // Modus kommt aus dem gespeicherten Parameter
+        else
+        {
+            const juce::SpinLock::ScopedLockType sl (samplesLock);
+            layerSamples[l].reset();
+            layerSamplePaths[l].clear();
+            engine.setLayerSample (l, nullptr);
+        }
+    }
+    changeCounter.fetch_add (1);
+}
+
+void KickforgeAudioProcessor::getStateInformation (juce::MemoryBlock& destData)
+{
+    if (auto xml = createStateXml())
+        copyXmlToBinary (*xml, destData);
+}
+
+void KickforgeAudioProcessor::setStateInformation (const void* data, int sizeInBytes)
+{
+    if (auto xml = getXmlFromBinary (data, sizeInBytes))
+        applyStateXml (*xml);
 }
 
 juce::AudioProcessorEditor* KickforgeAudioProcessor::createEditor()
 {
     return new KickforgeAudioProcessorEditor (*this);
-}
-
-void KickforgeAudioProcessor::getStateInformation (juce::MemoryBlock& destData)
-{
-    // Wrapper-XML, der APVTS-State und sample-Pfad enthält
-    juce::XmlElement root ("KickforgeState");
-    if (auto apvtsXml = apvts.copyState().createXml())
-        root.addChildElement (apvtsXml.release());
-
-    if (clickSamplePath.isNotEmpty())
-    {
-        auto* s = new juce::XmlElement ("ClickSample");
-        s->setAttribute ("path", clickSamplePath);
-        root.addChildElement (s);
-    }
-    copyXmlToBinary (root, destData);
-}
-
-void KickforgeAudioProcessor::setStateInformation (const void* data, int sizeInBytes)
-{
-    auto xml = getXmlFromBinary (data, sizeInBytes);
-    if (xml == nullptr) return;
-
-    // Rückwärts-kompatibel: alte Presets haben direkt den APVTS-State
-    if (xml->hasTagName ("KickforgeState"))
-    {
-        if (auto* apvtsXml = xml->getChildByName ("PARAMS"))
-            apvts.replaceState (juce::ValueTree::fromXml (*apvtsXml));
-        if (auto* s = xml->getChildByName ("ClickSample"))
-        {
-            juce::File f (s->getStringAttribute ("path"));
-            if (f.existsAsFile()) loadClickSample (f);
-        }
-    }
-    else
-    {
-        apvts.replaceState (juce::ValueTree::fromXml (*xml));
-    }
-}
-
-bool KickforgeAudioProcessor::loadClickSample (const juce::File& file)
-{
-    juce::AudioFormatManager fm;
-    fm.registerBasicFormats();
-    std::unique_ptr<juce::AudioFormatReader> reader (fm.createReaderFor (file));
-    if (reader == nullptr) return false;
-
-    // Bis zu 2 Sekunden laden (reicht für Transients/Clicks dicke)
-    const int maxSamples = (int) juce::jmin ((juce::int64) (reader->sampleRate * 2.0),
-                                             (juce::int64) reader->lengthInSamples);
-
-    auto buf = std::make_shared<juce::AudioBuffer<float>> (1, maxSamples);
-    buf->clear();
-    reader->read (buf.get(), 0, maxSamples, 0, true, false);
-
-    clickSampleBuffer = buf;
-    clickSampleSr     = reader->sampleRate;
-    clickSamplePath   = file.getFullPathName();
-
-    // Beiden Voices zuweisen (shared pointer — kein Kopieren)
-    voice.click()       .setSampleBuffer (clickSampleBuffer, clickSampleSr);
-    offlineVoice.click().setSampleBuffer (clickSampleBuffer, clickSampleSr);
-    paramsChanged.store (true);
-    return true;
-}
-
-void KickforgeAudioProcessor::clearClickSample()
-{
-    clickSampleBuffer.reset();
-    clickSamplePath.clear();
-    voice.click()       .setSampleBuffer (nullptr, 44100.0);
-    offlineVoice.click().setSampleBuffer (nullptr, 44100.0);
-    paramsChanged.store (true);
 }
 
 juce::AudioProcessor* JUCE_CALLTYPE createPluginFilter()

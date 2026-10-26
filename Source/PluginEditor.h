@@ -3,10 +3,11 @@
 #include <juce_audio_processors/juce_audio_processors.h>
 #include <juce_audio_utils/juce_audio_utils.h>
 #include "PluginProcessor.h"
-#include "WaveformDisplay.h"
+#include "KickVisualizer.h"
 #include "KickforgeLookAndFeel.h"
 
 class KickforgeAudioProcessorEditor : public juce::AudioProcessorEditor,
+                                      public juce::FileDragAndDropTarget,
                                       private juce::Timer
 {
 public:
@@ -14,13 +15,20 @@ public:
     ~KickforgeAudioProcessorEditor() override;
 
     void paint (juce::Graphics&) override;
+    void paintOverChildren (juce::Graphics&) override;
     void resized() override;
+
+    // WAV/AIFF auf eine Schicht ziehen → Sample-Slot dieser Schicht
+    bool isInterestedInFileDrag (const juce::StringArray& files) override;
+    void fileDragEnter (const juce::StringArray&, int x, int y) override { dragPos = { x, y }; repaint(); }
+    void fileDragMove  (const juce::StringArray&, int x, int y) override { dragPos = { x, y }; repaint(); }
+    void fileDragExit  (const juce::StringArray&) override              { dragPos = { -1, -1 }; repaint(); }
+    void filesDropped  (const juce::StringArray& files, int x, int y) override;
 
 private:
     using APVTS = juce::AudioProcessorValueTreeState;
     using SAtt  = APVTS::SliderAttachment;
     using BAtt  = APVTS::ButtonAttachment;
-    using CAtt  = APVTS::ComboBoxAttachment;
 
     enum class KnobSize { Big, Med, Small };
 
@@ -30,47 +38,38 @@ private:
         juce::Label  label;
         KnobSize     size = KnobSize::Med;
         std::unique_ptr<SAtt> att;
+        void setVisible (bool v) { slider.setVisible (v); label.setVisible (v); }
+        void setDimmed (bool d)  { slider.setAlpha (d ? 0.38f : 1.0f); label.setAlpha (d ? 0.38f : 1.0f); }
     };
-    struct ToggleCtrl
+    struct Toggle
     {
         juce::ToggleButton button;
         std::unique_ptr<BAtt> att;
     };
-    struct ChoiceCtrl
+
+    struct Panel
     {
-        juce::ComboBox combo;
-        juce::Label    label;
-        std::unique_ptr<CAtt> att;
+        juce::String index, title;
+        juce::Colour accent;
+        int layer = -1;                                   // 0..3 = Schicht mit Sample-Slot
+        std::vector<std::unique_ptr<Knob>> big, med, small;
+        juce::Rectangle<int> bounds;
+        int dividerY = 0;
+
+        // Sample-Slot
+        std::unique_ptr<Toggle> sampleToggle;
+        std::unique_ptr<juce::TextButton> loadBtn, clearBtn;
+        std::unique_ptr<juce::Label> sampleName;
+        std::unique_ptr<Knob> sGain, sPitch;
     };
 
-    struct LayerPanel
-    {
-        juce::String  index, title;
-        juce::Colour  accent;
-        std::unique_ptr<ToggleCtrl>        onToggle;   // null = Layer immer an
-        std::unique_ptr<ChoiceCtrl>        modeCombo;  // null = fester Oszillator
-        std::vector<std::unique_ptr<Knob>> knobs;      // erst die großen, dann die mittleren
-        int                                bigCount = 3;
-        std::unique_ptr<ChoiceCtrl>        shaperCombo, filterModeCombo;
-        std::unique_ptr<Knob>              filterCutKnob, filterResKnob, delayKnob;
-        juce::String                       fixedOscText;   // für Layer ohne Mode-Combo
-        juce::Rectangle<int>               bounds, oscRow;
-        int                                dividerY = 0;
-    };
-
-    // ---- LookAndFeel ZUERST deklarieren → wird zuletzt zerstört ----
+    // ---- LookAndFeel ZUERST → wird zuletzt zerstört ----
     KickforgeLookAndFeel lnf;
     KickforgeAudioProcessor& proc;
 
-    LayerPanel clickPanel, bodyPanel, tailPanel;
-
-    // EQ / FX / Master
-    std::unique_ptr<ToggleCtrl>        eqOnToggle, reverbOnToggle, transientOnToggle,
-                                       limiterToggle, oversampleToggle;
-    std::vector<std::unique_ptr<Knob>> eqKnobs, reverbKnobs, transientKnobs, masterKnobs;
-    std::unique_ptr<ChoiceCtrl>        masterShaperCombo;
-    juce::Rectangle<int>               eqBounds, fxBounds, masterBounds, meterBounds;
-    juce::Rectangle<int>               eqGroupRects[3];
+    Panel clickP, punchP, rumbleP, gritP, kickP, masterP;
+    std::unique_ptr<Toggle> syncToggle, keytrackToggle;
+    juce::Label tempoInfo;
 
     // Header
     std::unique_ptr<juce::Drawable> emblem;
@@ -82,59 +81,53 @@ private:
     juce::TextButton exportBtn     { "EXPORT WAV" };
     juce::TextButton triggerBtn    { "KICK" };
 
-    // Click-Sample
-    juce::TextButton loadSampleBtn  { "LOAD" };
-    juce::TextButton clearSampleBtn { juce::String::fromUTF8 ("\xe2\x9c\x95") };  // ✕
-    juce::Label      sampleNameLabel;
-
-    WaveformDisplay waveform;
-
-    // Output-Meter
+    KickVisualizer visualizer;
+    juce::Rectangle<int> meterBounds;
     float meterLevel = 0.0f, meterHold = 0.0f;
     int   meterHoldTicks = 0;
 
-    // Hintergrund-Textur (gebürsteter Stahl, prozedural)
     juce::Image bgTexture;
-
-    bool waveformDirty = true;
-    int  tickCount = 0;
+    juce::Point<int> dragPos { -1, -1 };
+    juce::uint32 lastChange = 0;
+    bool  vizDirty = true;
+    int   tickCount = 0;
     std::unique_ptr<juce::FileChooser> fileChooser;
 
-    // Visualizer-Rendering im Hintergrund (GUI-Thread wartet nie).
-    // renderPool MUSS das letzte Member sein: wird zuerst zerstört und
-    // wartet dabei auf laufende Jobs, bevor irgendetwas anderes abgebaut wird.
+    // Visualizer-Rendering im Hintergrund. renderPool MUSS das letzte Member sein.
     std::atomic<bool> renderInFlight { false };
     juce::ThreadPool  renderPool { juce::ThreadPoolOptions{}.withNumberOfThreads (1)
                                                             .withThreadName ("Kickforge Visualizer") };
 
     // --- Aufbau ---
-    std::unique_ptr<Knob>       makeKnob   (const juce::String& id, const juce::String& text,
-                                            juce::Colour accent, KnobSize size, bool bipolar = false);
-    std::unique_ptr<ToggleCtrl> makeToggle (const juce::String& id, const juce::String& text, juce::Colour accent);
-    std::unique_ptr<ChoiceCtrl> makeChoice (const juce::String& id, const juce::String& text, juce::Colour accent);
-    void buildLayerPanels();
-    void buildBottomRow();
+    std::unique_ptr<Knob>   makeKnob   (const juce::String& id, const juce::String& text, juce::Colour accent,
+                                        KnobSize size, bool bipolar = false);
+    std::unique_ptr<Toggle> makeToggle (const juce::String& id, const juce::String& text, juce::Colour accent);
+    void buildPanels();
+    void buildSampleSlot (Panel&);
     void buildHeader();
     void buildBackgroundTexture();
+    Panel* layerPanel (int layer);
+    Panel* panelAt (juce::Point<int>);
 
     // --- Aktionen ---
     void refreshPresetCombo();
-    void loadSelectedPreset (int delta);
+    void stepPreset (int delta);
     void onSavePresetClicked();
     void onExportClicked();
-    void onLoadSampleClicked();
-    void onClearSampleClicked();
-    void updateSampleLabel();
-    void renderWaveform();
+    void onLoadSampleClicked (int layer);
+    void updateSampleSlots();
+    void updateTempoInfo();
+    void renderVisualizer();
 
     // --- Zeichnen / Layout ---
-    void drawPanel (juce::Graphics&, juce::Rectangle<int>, const juce::String& index,
-                    const juce::String& title, juce::Colour accent) const;
+    void drawPanel (juce::Graphics&, const Panel&) const;
     void drawScrew (juce::Graphics&, juce::Point<float> c, float angle) const;
     void drawHeader (juce::Graphics&) const;
     void drawMeter (juce::Graphics&) const;
-    void layoutPanel (LayerPanel&);
     void placeKnob (Knob&, juce::Rectangle<int> cell);
+    void layoutRow (std::vector<std::unique_ptr<Knob>>&, juce::Rectangle<int> row, int slots);
+    void layoutLayerPanel (Panel&);
+    void layoutSampleSlot (Panel&, juce::Rectangle<int> area, bool stacked);
 
     void timerCallback() override;
 

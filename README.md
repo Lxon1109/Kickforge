@@ -1,95 +1,53 @@
 # Kickforge
 
 Kick-Builder-Plugin für **Hardtechno, Industrial Hardtechno und Schranz**.
-VST3 + Standalone, Windows x64 — gebaut mit JUCE / C++20.
+VST3 + Standalone, Windows x64. Gebaut mit JUCE und C++20.
 
-## Status: v0.6 — Industrial-Design
+## Status: v0.7 — Industrial-Engine
 
-### Neu in v0.6
-
-- **Eigenes LookAndFeel** (`KickforgeLookAndFeel`): Stahl-Knobs mit Skala,
-  leuchtendem Wertbogen und Zeiger (bipolar bei EQ-Gain/Transient),
-  LED-Schalter, kantige Buttons/Combos, dunkle Popup-Menüs.
-- **Logo**: Amboss-Emblem mit aufsteigenden Kick-Peaks (`Resources/Logo/emblem.svg`,
-  Generator-Skripte daneben) + Wordmark KICK/FORGE.
-- **Schrift**: Chakra Petch (SIL Open Font License, `Resources/Fonts/OFL.txt`),
-  eingebettet als BinaryData.
-- **Hierarchie**: feste Knob-Größen — groß (Tune/Pitch/Decay), mittel
-  (Drive/Level, EQ, FX), klein (Filter/Delay).
-- **Visualizer**: Click/Body/Tail als farbige Flächen + Summe als Kontur,
-  Zeitlineal in ms, Länge passt sich der Kick an. Rendert im Hintergrund-Thread.
-- **Output-Meter** im Master (Segment-LEDs + Peak-Hold).
-- **Werte mit Einheiten**: „2.50 kHz", „8.0 ms", „45 %", „+3.0 dB" — Eingabe
-  per Tippen versteht „2.5k", „120ms", „1.2s".
-- **Doppelklick** auf einen Knob = Default-Wert.
-
-### Synthese (seit v0.5)
-
-Synthese + Sample-Playback kombiniert. Jetzt kann der Click-Layer entweder
-synthetisches Noise/Blip/Sine/Triangle sein — oder dein eigenes WAV-Sample
-(Transient-Lib, Vinyl-Rip, aufgenommener Snare-Hit…).
+Die Engine ist neu und nach dem Bauplan echter Industrial-Hardtechno-Kicks aufgebaut.
+Referenzen waren die Teknovault Industrial Kick Vault (Punchy / Heavy / Noisy / Raw /
+Heavy Raw) und Harsh-Ripped-Kicks bei 160 BPM. Die Parameter der Factory-Presets
+wurden per Analyse und Optimierung an diese Kicks angepasst: Bandpegel über die Zeit,
+Hüllkurve, spektrale Flachheit, Unruhe im Tail und Nachklang.
 
 ```
-                                             ┌──────────┐
-  CLICK (osc/sample)   → [Shaper] → [Filter]─┤          │
-  BODY  (osc)          → [Shaper] → [Filter]─┤   MIX    ├─► OvS↑→Drive→Shape→OvS↓→EQ→Trans→Reverb→SoftClip→Gain→OUT
-  TAIL  (osc)          → [Shaper] → [Filter]─┤          │
-         └── alle mit eigenem Layer-Delay ───┘
+CLICK   0–10 ms     Rausch-Knack, Hochpass
+PUNCH   0–~250 ms   Sinus mit 2-stufigem Pitch-Sweep → Dirt → asymmetrische Sättigung
+                    → Clipper → Tone → Hochpass-Sweep (Bass kommt später rein)
+RUMBLE  ab ~50 ms   Anfang des Punch → langer Hall → Drive → Tiefpass → Drive → Tiefpass
+                    (der unruhige, verzerrte Hall-Tail), bis Beat-Ende gehalten
+GRIT    ab ~25 ms   verzerrte Mitten + Rauschen, Stereo (Haas + Breite), mit Länge/Tail
+KICK                Länge in Beats (DAW-Tempo), harter Schnitt, optional Nachklang
+                    mit fallender Tonhöhe, Variation (Seed)
+MASTER              2-Band-Clipper: Bass < 200 Hz clippen + runden, Höhen sättigen,
+                    weiche Grenze bei 0 dBFS. Alles 2× Oversampling.
 ```
 
-### Neu in v0.5
+### Bedienung
 
-- **Sample-Playback-Modus** im Click-Layer: `OSC = Sample`.
-  Load-Button lädt WAV/AIFF/FLAC/MP3/OGG, Pitch wirkt auf Playback-Rate
-  (via `tune` als Referenz-Frequenz). Sample-Pfad wird mit dem Projekt
-  gespeichert und beim Laden automatisch nachgeladen.
-
-- **Master Reverb** (`juce::dsp::Reverb`): Room Size, Damping, Wet.
-  Für Industrial-Räume und Schranz-Hall. Standard: Off.
-
-- **Transient Shaper** auf Master: Attack & Sustain bipolar (-1 bis +1).
-  Zwei-Follower-Detection (fast + slow) — positiver Diff = Attack-Boost,
-  negativer Diff = Sustain-Boost. Klassisches SPL-Transient-Designer-Prinzip.
-
-- **Layer-Delays** pro Layer (0–100 ms). Click vor Body, Body vor Tail —
-  oder Tail minimal verzögert für mehr Breite im Low-End. Mit Phase-Alignment
-  via Delay wirkt die Summe deutlich druckvoller.
-
-Jetzt bei **55 Parametern** total.
-
-### Layer-Charakter (Werks-Defaults, auf Schranz/Industrial getrimmt)
-
-| Layer | Default-OSC | Default-Shaper | Default-Filter | Default-Delay |
-|-------|-------------|----------------|----------------|---------------|
-| CLICK | Noise       | HardClip       | HP @ 300 Hz    | 0 ms          |
-| BODY  | Sine        | HardClip       | Off            | 0 ms          |
-| TAIL  | Sine        | Tanh           | LP @ 180 Hz    | 0 ms          |
-
-Click kann auf **Sample** umgestellt werden — dann lädst du dein eigenes
-Transient-Sample (ein guter Vinyl-Click, ein akustischer Snare-Hit, ein
-Industrial-Metal-Treffer) und spielst damit anstelle des synthetischen Noise-Bursts.
-
-### Chain-Reihenfolge Master
-
-```
-Mix → OvS Up → Master Drive → Master Shaper → OvS Down
-    → Master EQ → Transient Shaper → Reverb → Soft-Clip → Gain → Out
-```
+- **20 Factory-Presets**: *Industrial* Heavy / Punchy / Noisy / Raw / Heavy Raw (150 BPM)
+  und *Harsh* Ripped + 14 Varianten (160 BPM).
+- **Host Sync**: Die Kick ist genau so lang wie eingestellt (z. B. 1 Beat) beim Tempo
+  der DAW. Ohne DAW-Tempo gilt der TEMPO-Knob.
+- **Key**: Grundton der Kick (Hz + Notenname). **Key Track**: Die gespielte MIDI-Note
+  bestimmt den Grundton, gefaltet auf 40–80 Hz.
+- **Sample-Slots**: In jeder Schicht kann statt der Synthese ein eigenes Sample laufen.
+  Dafür LOAD drücken oder eine WAV direkt auf die Schicht ziehen, GAIN/PITCH pro Slot.
+  Der Pfad wird mit dem Projekt gespeichert.
+- **Visualizer**: Click, Punch, Rumble und Grit als farbige Flächen, die Summe als
+  Kontur, dazu eine Markierung am Beat-Ende.
+- **Velocity** steuert die Lautstärke, der Klangcharakter bleibt gleich.
+- **EXPORT WAV** speichert die Kick als 24-Bit-WAV inkl. Nachklang.
 
 ## Build (Windows x64)
 
-**Einfachster Weg:** `build-windows.bat` doppelklicken. Das Skript findet
-Visual Studio, lädt JUCE 8.0.4 herunter, baut VST3 + Standalone, legt alles
-in `dist\` und installiert die VST3 auf Wunsch nach
-`C:\Program Files\Common Files\VST3\`.
-
-Voraussetzung: Visual Studio 2022 Community (kostenlos) mit dem Workload
-„Desktopentwicklung mit C++".
-
 **Ohne lokale Installation:** Das Repo enthält eine `appveyor.yml`. Auf
-[ci.appveyor.com](https://ci.appveyor.com) mit GitHub anmelden (kostenlos für
-öffentliche Repos), Projekt hinzufügen, Build starten. Das fertige Paket
-liegt danach unter **Artifacts** als `Kickforge-Windows-x64.zip`.
+[ci.appveyor.com](https://ci.appveyor.com) läuft der Build kostenlos (öffentliches Repo).
+Das fertige Paket liegt unter **Artifacts** als `Kickforge-Windows-x64.zip`.
+
+**Lokal:** `build-windows.bat` doppelklicken. Voraussetzung ist Visual Studio 2022
+Community mit dem Workload „Desktopentwicklung mit C++“.
 
 Manuell (Developer Command Prompt):
 
@@ -99,28 +57,37 @@ cmake -S . -B build -A x64
 cmake --build build --config Release
 ```
 
-## DSP-Tests (optional)
+## Tests
 
 ```bash
 cmake -S . -B build -DKICKFORGE_BUILD_TESTS=ON
-cmake --build build --config Release --target KickforgeTests
+cmake --build build --config Release --target KickforgeTests KickforgeRender
 ```
 
-Prüft u. a.: keine NaN/Inf, Soft-Clip hält Peak < 1.0 bei allen Shapern auf
-Max-Drive, Layer-Delay trifft den Onset sample-genau, Sample-Modus spielt und
-endet korrekt, SVF-LP/HP dämpfen > 20 dB, ungerade Host-Blockgrößen und die
-Render-Zeit des Visualizers.
+`KickforgeTests` prüft:
+- alle Presets: endlich, ≤ 0 dBFS, Lautheit wie Hardtechno-Kicks, Stille nach dem Ende
+- Länge folgt dem Tempo
+- jede Kick im Loop identisch, unabhängig von der Blockgröße
+- Offline-Render = Live-Render
+- 44.1 vs. 96 kHz klingen gleich
+- Velocity, Rolls und Mono-Ausgang
+- Sample-Slot und Speichern/Laden
+- Key Track
+- Parameter-Fuzz über alle Bereiche, Abtastraten und Blockgrößen
+- CPU-Last
+
+`KickforgeRender` rendert die Engine ohne DAW, z. B. für Klangvergleiche:
+
+```bash
+KickforgeRender out.raw fEnd=55 punchDrive=0.8 beats=16 bpm=150
+```
+
+Die Factory-Presets entstehen mit `Tools/gen_presets.py` aus den Fit-Ergebnissen
+(`Tools/make_presets.sh`).
 
 ## Roadmap
 
-**Phase 6 — Workflow / Content**
-- Factory-Preset-Erweiterung mit Sample-basierten Presets
+- Preset-Browser mit Kategorien als Tabs, Favoriten
+- Randomizer innerhalb eines Stils
+- weitere Stile: Schranz, Bounce, Hardgroove (Referenzen analysieren → fitten)
 - Drag-to-DAW direkt aus dem Visualizer
-- Preset-Browser mit Kategorien (Stile als Tabs)
-- Randomizer mit Style-Rules
-
-**Phase 7 — DSP-Feinschliff**
-- Pre-Filter *vor* dem Shaper (für andere Verzerrungs-Charaktere)
-- Bass-Mono unter X Hz
-- Side-Chain-Ducking-Ausgang für andere Spuren
-- Convolution-Reverb als Alternative zum algorithmischen Reverb
