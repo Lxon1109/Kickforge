@@ -1,0 +1,32 @@
+# AppVeyor: kostenloser Windows-Build für öffentliche Repos
+# (Visual Studio 2022 ist auf dem Image vorinstalliert)
+
+version: 0.6.{build}
+image: Visual Studio 2022
+platform: x64
+configuration: Release
+clone_depth: 1
+skip_tags: true
+
+install:
+  - git clone --depth 1 --branch 8.0.4 https://github.com/juce-framework/JUCE external/JUCE
+
+build_script:
+  - cmake -S . -B build -G "Visual Studio 17 2022" -A x64 -DKICKFORGE_BUILD_TESTS=ON
+  - cmake --build build --config Release --parallel
+
+after_build:
+  - ps: |
+      New-Item -ItemType Directory -Force dist | Out-Null
+      Copy-Item -Recurse build/Kickforge_artefacts/Release/VST3/Kickforge.vst3 dist/
+      Copy-Item build/Kickforge_artefacts/Release/Standalone/Kickforge.exe dist/
+      Copy-Item Docs/INSTALLATION.txt dist/
+      Compress-Archive -Force -Path dist/* -DestinationPath Kickforge-Windows-x64.zip
+      Get-Item Kickforge-Windows-x64.zip | Select-Object Name, Length
+
+test_script:
+  - build\KickforgeTests_artefacts\Release\KickforgeTests.exe
+
+artifacts:
+  - path: Kickforge-Windows-x64.zip
+    name: Kickforge-Windows-x64

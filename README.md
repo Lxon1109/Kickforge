@@ -86,6 +86,11 @@ in `dist\` und installiert die VST3 auf Wunsch nach
 Voraussetzung: Visual Studio 2022 Community (kostenlos) mit dem Workload
 „Desktopentwicklung mit C++".
 
+**Ohne lokale Installation:** Das Repo enthält eine `appveyor.yml`. Auf
+[ci.appveyor.com](https://ci.appveyor.com) mit GitHub anmelden (kostenlos für
+öffentliche Repos), Projekt hinzufügen, Build starten. Das fertige Paket
+liegt danach unter **Artifacts** als `Kickforge-Windows-x64.zip`.
+
 Manuell (Developer Command Prompt):
 
 ```bat

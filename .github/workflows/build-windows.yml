@@ -32,20 +32,7 @@ jobs:
           New-Item -ItemType Directory -Force dist | Out-Null
           Copy-Item -Recurse build/Kickforge_artefacts/Release/VST3/Kickforge.vst3 dist/
           Copy-Item build/Kickforge_artefacts/Release/Standalone/Kickforge.exe dist/
-          @"
-          KICKFORGE - Installation (Windows, FL Studio)
-
-          1) Den Ordner "Kickforge.vst3" kopieren nach:
-             C:\Program Files\Common Files\VST3\
-             (Windows fragt nach Admin-Bestaetigung - einfach bestaetigen)
-
-          2) FL Studio: Options > Manage plugins > "Find installed plugins"
-             Kickforge erscheint dann unter den Instrumenten (Generators).
-
-          Kickforge.exe ist die Standalone-Version: startet ohne DAW,
-          Audio-Ausgang oben links unter "Options" einstellen.
-          "@ | Out-File -Encoding utf8 dist/INSTALLATION.txt
-          Get-ChildItem -Recurse dist | Select-Object FullName, Length
+          Copy-Item Docs/INSTALLATION.txt dist/
 
       - name: Artefakt hochladen
         uses: actions/upload-artifact@v4
