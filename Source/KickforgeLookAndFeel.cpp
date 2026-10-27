@@ -243,6 +243,15 @@ void KickforgeLookAndFeel::drawButtonBackground (juce::Graphics& g, juce::Button
         return;
     }
 
+    // Umschalter (SYNTH | SAMPLE): aktiv = Akzentfarbe gefüllt
+    if (b.getToggleState())
+    {
+        const auto acc = b.findColour (juce::TextButton::buttonOnColourId);
+        g.setGradientFill (ColourGradient (acc.brighter (0.15f), 0.0f, r.getY(), acc.darker (0.25f), 0.0f, r.getBottom(), false));
+        g.fillPath (shape);
+        return;
+    }
+
     auto top = Colour (0xff221f1d), bot = Colour (0xff161413);
     if (down) { top = theme::brand.withAlpha (0.35f); bot = theme::brand.withAlpha (0.2f); }
     g.setGradientFill (ColourGradient (top, 0.0f, r.getY(), bot, 0.0f, r.getBottom(), false));
@@ -254,15 +263,25 @@ void KickforgeLookAndFeel::drawButtonBackground (juce::Graphics& g, juce::Button
 juce::Font KickforgeLookAndFeel::getTextButtonFont (juce::TextButton& b, int h)
 {
     const bool primary = (bool) b.getProperties()["primary"];
-    return fonts().get (W::Bold, juce::jmin (primary ? 16.0f : 13.5f, (float) h * 0.55f), 0.1f);
+    return fonts().get (W::Bold, juce::jmin (primary ? 16.0f : 13.5f, (float) h * 0.5f), 0.1f);
 }
 
 void KickforgeLookAndFeel::drawButtonText (juce::Graphics& g, juce::TextButton& b, bool, bool)
 {
     const bool primary = (bool) b.getProperties()["primary"];
+    const bool left    = b.getProperties()["align"].toString() == "left";
+    const bool on      = b.getToggleState();
+    if (left)
+    {
+        // Auswahlfeld (Sample-/Kit-Name): linksbündig, kürzen statt umbrechen
+        g.setFont (fonts().get (W::SemiBold, juce::jmin (13.0f, (float) b.getHeight() * 0.52f), 0.02f));
+        g.setColour (b.isEnabled() ? theme::text : theme::faint);
+        g.drawFittedText (b.getButtonText(), b.getLocalBounds().reduced (8, 0), juce::Justification::centredLeft, 1, 0.8f);
+        return;
+    }
     g.setFont (getTextButtonFont (b, b.getHeight()));
-    g.setColour (primary ? juce::Colour (0xff1a0d05)
-                         : (b.isEnabled() ? theme::text : theme::faint));
+    g.setColour (primary || on ? juce::Colour (0xff1a0d05)
+                               : (b.isEnabled() ? theme::text : theme::faint));
     g.drawText (b.getButtonText(), b.getLocalBounds(), juce::Justification::centred, false);
 }
 

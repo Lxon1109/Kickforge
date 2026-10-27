@@ -14,7 +14,7 @@
 */
 namespace kf::params
 {
-    enum class Unit { Pct, Hz, Ms, Num, Beats, Semi, Gain, Key, Bpm, Int, Mult };
+    enum class Unit { Pct, Hz, Ms, Num, Beats, Semi, Gain, Key, Bpm, Int, Mult, MsBip, DecayMs };
 
     struct Def
     {
@@ -99,10 +99,16 @@ namespace kf::params
     inline juce::String srcId   (int layer) { return juce::String ("src_")    + layerKey (layer); }
     inline juce::String sGainId (int layer) { return juce::String ("sgain_")  + layerKey (layer); }
     inline juce::String sPitchId(int layer) { return juce::String ("spitch_") + layerKey (layer); }
+    inline juce::String onId    (int layer) { return juce::String ("on_")     + layerKey (layer); }
+    inline juce::String sOffId  (int layer) { return juce::String ("soff_")   + layerKey (layer); }
+    inline juce::String sDecId  (int layer) { return juce::String ("sdec_")   + layerKey (layer); }
+    inline juce::String sDrvId  (int layer) { return juce::String ("sdrv_")   + layerKey (layer); }
 
     // Weitere Schalter
     constexpr auto syncId     = "sync";       // Host-Tempo verwenden
     constexpr auto keytrackId = "keytrack";   // MIDI-Note bestimmt den Grundton
+    constexpr auto keylockId  = "keylock";    // Punch-/Rumble-Samples auf KEY stimmen
+    constexpr auto autoplayId = "autoplay";   // beim Blättern in der Bibliothek sofort abspielen
 
     // ---- Anzeige ----
     inline juce::String noteName (float hz)
@@ -142,6 +148,9 @@ namespace kf::params
             case Unit::Bpm:   return num (v, 1) + " BPM";
             case Unit::Int:   return "#" + String (juce::roundToInt (v));
             case Unit::Mult:  return num (v, 2) + "x";
+            case Unit::MsBip: return std::abs (v) < 0.05f ? String ("0 ms")
+                                                          : (v > 0.0f ? "+" : "-") + num (std::abs (v), std::abs (v) < 10.0f ? 1 : 0) + " ms";
+            case Unit::DecayMs: return v >= 999.0f ? String ("AUS") : num (v, 0) + " ms";
         }
         return num (v, 2);
     }
@@ -153,6 +162,7 @@ namespace kf::params
         float v = (u == Unit::Int) ? t.retainCharacters ("0123456789").getFloatValue() : t.getFloatValue();
         if (u == Unit::Hz && t.contains ("k"))                        v *= 1000.0f;
         if (u == Unit::Ms && t.endsWith ("s") && ! t.contains ("ms")) v *= 1000.0f;
+        if (u == Unit::DecayMs && (t.contains ("aus") || t.contains ("off"))) v = 1000.0f;
         if (u == Unit::Pct)                                           v /= 100.0f;
         if (u == Unit::Gain)                                          v = juce::Decibels::decibelsToGain (v);
         return v;

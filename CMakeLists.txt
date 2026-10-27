@@ -5,7 +5,7 @@ cmake_policy(SET CMP0091 NEW)
 # separat installierte VC++-Redistributable (kein "VCRUNTIME140.dll fehlt")
 set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
 
-project(Kickforge VERSION 0.7.0 LANGUAGES C CXX)
+project(Kickforge VERSION 0.8.0 LANGUAGES C CXX)
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -56,6 +56,8 @@ set(KICKFORGE_SOURCES
     Source/KickforgeLookAndFeel.h
     Source/IndustrialEngine.cpp
     Source/IndustrialEngine.h
+    Source/SampleLibrary.cpp
+    Source/SampleLibrary.h
     Source/ParamTable.h
     Source/FactoryPresets.h
     Source/Presets.h
@@ -65,6 +67,7 @@ set(KICKFORGE_SOURCES
 target_sources(Kickforge PRIVATE ${KICKFORGE_SOURCES})
 
 target_compile_options(Kickforge PRIVATE $<$<CXX_COMPILER_ID:MSVC>:/utf-8>)
+target_compile_definitions(Kickforge PRIVATE $<$<CXX_COMPILER_ID:MSVC>:_SILENCE_CXX20_OLD_SHARED_PTR_ATOMIC_SUPPORT_DEPRECATION_WARNING>)
 
 target_compile_definitions(Kickforge PUBLIC
     JUCE_WEB_BROWSER=0
@@ -95,6 +98,7 @@ if(KICKFORGE_BUILD_TESTS)
     target_sources(KickforgeTests PRIVATE Tests/PluginTests.cpp ${KICKFORGE_SOURCES})
     target_compile_definitions(KickforgeTests PRIVATE
         JUCE_USE_CURL=0 JUCE_WEB_BROWSER=0 JUCE_MODAL_LOOPS_PERMITTED=1
+        $<$<CXX_COMPILER_ID:MSVC>:_SILENCE_CXX20_OLD_SHARED_PTR_ATOMIC_SUPPORT_DEPRECATION_WARNING>
         JucePlugin_VersionString="${PROJECT_VERSION}"
         JucePlugin_Name="Kickforge")
     target_compile_options(KickforgeTests PRIVATE $<$<CXX_COMPILER_ID:MSVC>:/utf-8>)
@@ -111,7 +115,8 @@ if(KICKFORGE_BUILD_TESTS)
     # Render-Werkzeug für Klangvergleiche (IndustrialEngine ohne DAW)
     juce_add_console_app(KickforgeRender PRODUCT_NAME "KickforgeRender")
     target_sources(KickforgeRender PRIVATE Tests/RenderTool.cpp Source/IndustrialEngine.cpp)
-    target_compile_definitions(KickforgeRender PRIVATE JUCE_USE_CURL=0 JUCE_WEB_BROWSER=0)
+    target_compile_definitions(KickforgeRender PRIVATE JUCE_USE_CURL=0 JUCE_WEB_BROWSER=0
+        $<$<CXX_COMPILER_ID:MSVC>:_SILENCE_CXX20_OLD_SHARED_PTR_ATOMIC_SUPPORT_DEPRECATION_WARNING>)
     target_compile_options(KickforgeRender PRIVATE $<$<CXX_COMPILER_ID:MSVC>:/utf-8>)
     target_link_libraries(KickforgeRender PRIVATE
         juce::juce_audio_basics

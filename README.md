@@ -3,7 +3,28 @@
 Kick-Builder-Plugin für **Hardtechno, Industrial Hardtechno und Schranz**.
 VST3 + Standalone, Windows x64. Gebaut mit JUCE und C++20.
 
-## Status: v0.7 — Industrial-Engine
+## Status: v0.8 — Kick Builder mit Sample-Bibliothek
+
+Kickforge baut Kicks aus **handgemachten Layer-Samples**, wie der Teknovault Kick Builder.
+Die Samples bleiben in deinen eigenen Ordnern, Kickforge speichert nur die Pfade.
+
+- **Bibliothek**: Der Teknovault Kick Builder und die Kick Vault werden beim ersten Start
+  automatisch gefunden (Downloads, Dokumente, Desktop, Musik, Splice). Über BIBLIOTHEK ▾
+  kannst du weitere Ordner hinzufügen. Dateien werden nach Namen und Ordnern einsortiert:
+  Click, Punch (auch komplette Kicks), Rumble/Tail/Crunch und Top Layer.
+  Loops, Fills, FX und Kopien aus Ableton-Packs werden übersprungen.
+- **Kits**: Zusammengehörige Layer (KICK_7_PUNCH, KICK_7_TAIL …) werden zu Kits.
+  KIT ◀ ▶ lädt alle vier Schichten auf einmal.
+- **ZUFALL**: würfelt eine neue Kombination, KEY LOCK hält dabei alles in einer Tonart.
+- **Pro Schicht**: ◀ Name ▶ RND, eine Liste nach Ordnern, SYNTH/SAMPLE und ON.
+  Dazu die Regler GAIN, PITCH, DRIVE, OFFSET (früher oder später einsetzen) und DECAY.
+- **KEY LOCK**: Der Grundton jedes Kits wird erkannt (YIN, gecacht). Punch und Rumble
+  werden auf KEY gestimmt, um maximal ±6 Halbtöne.
+- **AUTO-PLAY**: spielt jede Auswahl sofort an.
+- **Projekte**: Wurden Samples verschoben, findet Kickforge sie über den Dateinamen
+  in der Bibliothek wieder.
+
+## v0.7 — Industrial-Engine (Synthese, weiterhin pro Schicht wählbar)
 
 Die Engine ist neu und nach dem Bauplan echter Industrial-Hardtechno-Kicks aufgebaut.
 Referenzen waren die Teknovault Industrial Kick Vault (Punchy / Heavy / Noisy / Raw /
@@ -64,7 +85,9 @@ cmake -S . -B build -DKICKFORGE_BUILD_TESTS=ON
 cmake --build build --config Release --target KickforgeTests KickforgeRender
 ```
 
-`KickforgeTests` prüft:
+`KickforgeTests` prüft auch die Bibliothek: Einordnung, Kits, Grundton, KEY LOCK,
+Offset/Decay/Drive, Mute, Blättern/Zufall und das Wiederfinden verschobener Samples.
+Außerdem prüft es:
 - alle Presets: endlich, ≤ 0 dBFS, Lautheit wie Hardtechno-Kicks, Stille nach dem Ende
 - Länge folgt dem Tempo
 - jede Kick im Loop identisch, unabhängig von der Blockgröße

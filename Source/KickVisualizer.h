@@ -91,7 +91,7 @@ public:
 
         // Legende
         auto legend = outer.reduced (16.0f, 7.0f).removeFromTop (14.0f);
-        const char* names[numLayers] = { "CLICK", "PUNCH", "RUMBLE", "GRIT" };
+        const char* names[numLayers] = { "CLICK", "PUNCH", "RUMBLE", "TOP" };
         g.setFont (fonts->get (T::Weight::Bold, 10.5f, 0.12f));
         for (int i = 0; i < numLayers; ++i)
         {

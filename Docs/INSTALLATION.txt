@@ -1,4 +1,4 @@
-KICKFORGE v0.7 – Installation (Windows, FL Studio)
+KICKFORGE v0.8 – Installation (Windows, FL Studio)
 ==================================================
 
 1) Den Ordner "Kickforge.vst3" kopieren nach:
@@ -16,6 +16,20 @@ KICKFORGE v0.7 – Installation (Windows, FL Studio)
 3) Kickforge.exe ist die Standalone-Version: startet ohne DAW.
    Audio-Ausgang oben links unter "Options" einstellen,
    dann mit dem KICK-Button oder per MIDI-Keyboard spielen.
+
+Sample-Bibliothek (neu in v0.8)
+------------------------------
+- Beim ersten Start sucht Kickforge in Downloads, Dokumenten, Desktop, Musik und
+  Splice nach "Kick Builder"- und "Kick Vault"-Ordnern (z. B. Teknovault).
+  Das dauert einen Moment. Oben in der LIBRARY-Leiste steht danach, wie viele
+  Samples und Kits gefunden wurden.
+- Andere Ordner: BIBLIOTHEK ▾ → "Ordner hinzufügen…".
+- KIT ◀ ▶ lädt ein komplettes Kit (Click + Punch + Rumble + Top).
+- ZUFALL würfelt eine neue Kombination, KEY LOCK stimmt sie auf KEY.
+- In jeder Schicht: ◀ ▶ blättern, auf den Namen klicken = Liste, RND = Zufall.
+  Regler: GAIN, PITCH, DRIVE, OFFSET (Einsatz früher/später), DECAY.
+- SYNTH/SAMPLE schaltet eine Schicht zwischen Synthese und Sample um.
+  ON schaltet die Schicht stumm.
 
 Bedienung
 ---------

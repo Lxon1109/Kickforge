@@ -99,6 +99,8 @@ struct IndustrialEngine::Voice
     // Samples pro Schicht (beim Start übernommen) + Lesepositionen
     LayerSamplePtr samples[NumLayers];
     double samplePos[NumLayers] { 0, 0, 0, 0 };
+    int    sampleWait[NumLayers] { 0, 0, 0, 0 };          // Verzögerung (Samples, OS-Rate)
+    float  sampleEnv[NumLayers]  { 1, 1, 1, 1 };          // Ausklingen
 
     explicit Voice (int seed) : rng (seed), rng2 (seed + 7919) {}
 
@@ -106,8 +108,8 @@ struct IndustrialEngine::Voice
     static inline void readSample (const LayerSample& s, double& pos, double rate, float& l, float& r)
     {
         const int n = s.buffer.getNumSamples();
-        const int i0 = (int) pos;
-        if (i0 < 0 || i0 >= n - 1) { l = r = 0.0f; return; }
+        const int i0 = (int) std::floor (pos);
+        if (i0 < 0 || i0 >= n - 1) { l = r = 0.0f; pos += rate; return; }
         const float fr = (float) (pos - i0);
         const float* c0 = s.buffer.getReadPointer (0);
         const float* c1 = s.buffer.getNumChannels() > 1 ? s.buffer.getReadPointer (1) : c0;
@@ -141,7 +143,15 @@ struct IndustrialEngine::Voice
     void start (const IndustrialParams& p, float velocity, float noteHz, const LayerSamplePtr* layerSamples)
     {
         reset();
-        for (int l = 0; l < NumLayers; ++l) { samples[l] = layerSamples[l]; samplePos[l] = 0.0; }
+        for (int l = 0; l < NumLayers; ++l)
+        {
+            samples[l] = layerSamples[l];
+            const double srcSr = samples[l] != nullptr ? samples[l]->sampleRate : 44100.0;
+            const float off = p.sampleOffsetMs[l];
+            samplePos[l]  = off < 0.0f ? (double) -off * 0.001 * srcSr : 0.0;   // Anfang überspringen
+            sampleWait[l] = off > 0.0f ? (int) (off * 0.001 * sr) : 0;          // verzögert starten
+            sampleEnv[l]  = 1.0f;
+        }
         active = true;
         t = 0;
         vel = juce::jlimit (0.0f, 1.0f, velocity);
@@ -234,6 +244,32 @@ struct IndustrialEngine::Voice
             sRate[l] = useSample[l] ? (samples[l]->sampleRate / sr) * std::exp2 (p.samplePitchSemi[l] / 12.0)
                                     : 0.0;
         }
+        // Ausklingen (-60 dB nach decayMs) und Sättigung je Sample-Schicht
+        float decMul[NumLayers], sDrv[NumLayers], sDrvG[NumLayers], sDrvN[NumLayers], lvl[NumLayers];
+        const float synthLvl[NumLayers] { p.clickLevel, p.punchLevel, p.rumbleLevel, p.gritLevel };
+        for (int l = 0; l < NumLayers; ++l)
+        {
+            const float dMs = p.sampleDecayMs[l];
+            decMul[l] = dMs >= 999.0f ? 1.0f : std::exp (-6.9f / juce::jmax (1.0f, msToSamples (dMs, sr)));
+            sDrv[l]  = juce::jlimit (0.0f, 1.0f, p.sampleDrive[l]);
+            sDrvG[l] = 1.0f + 10.0f * sDrv[l];
+            sDrvN[l] = 1.0f / std::tanh (sDrvG[l]);
+            lvl[l]   = p.layerOn[l] < 0.5f ? 0.0f : (useSample[l] ? 1.0f : synthLvl[l]);
+        }
+        auto playSample = [&] (int l, float& L, float& R)
+        {
+            if (sampleWait[l] > 0) { --sampleWait[l]; L = R = 0.0f; return; }
+            readSample (*samples[l], samplePos[l], sRate[l], L, R);
+            const float e = sampleEnv[l] * p.sampleGain[l];
+            sampleEnv[l] *= decMul[l];
+            L *= e; R *= e;
+            if (sDrv[l] > 0.0f)
+            {
+                const float d = sDrv[l];
+                L = (1.0f - d) * L + d * std::tanh (sDrvG[l] * L) * sDrvN[l];
+                R = (1.0f - d) * R + d * std::tanh (sDrvG[l] * R) * sDrvN[l];
+            }
+        };
 
         juce::Reverb::Parameters rp;
         rp.roomSize = juce::jlimit (0.0f, 1.0f, p.rumbleSize);
@@ -316,10 +352,9 @@ struct IndustrialEngine::Voice
             // Samples statt Synthese (Stereo)
             float clickL = clickBuf[(size_t) i], clickR = clickL;
             float punchL = punchBuf[(size_t) i], punchR = punchL;
-            float sl, sr_;
-            if (useSample[ClickL])  { readSample (*samples[ClickL],  samplePos[ClickL],  sRate[ClickL],  sl, sr_); clickL  = sl * p.sampleGain[ClickL];  clickR  = sr_ * p.sampleGain[ClickL]; }
-            if (useSample[PunchL])  { readSample (*samples[PunchL],  samplePos[PunchL],  sRate[PunchL],  sl, sr_); punchL  = sl * p.sampleGain[PunchL];  punchR  = sr_ * p.sampleGain[PunchL]; }
-            if (useSample[RumbleL]) { readSample (*samples[RumbleL], samplePos[RumbleL], sRate[RumbleL], sl, sr_); rumbleL = sl * p.sampleGain[RumbleL]; rumbleR = sr_ * p.sampleGain[RumbleL]; }
+            if (useSample[ClickL])  playSample (ClickL,  clickL,  clickR);
+            if (useSample[PunchL])  playSample (PunchL,  punchL,  punchR);
+            if (useSample[RumbleL]) playSample (RumbleL, rumbleL, rumbleR);
 
             // Grit: verzerrte Mitten (aus Punch+Rumble, ggf. Samples) + Rauschen, Stereo
             const float tonal = fold (gritBp.bp (0.5f * (punchL + punchR) + 0.5f * (rumbleL + rumbleR)) * 3.0f);
@@ -340,10 +375,7 @@ struct IndustrialEngine::Voice
             const float gm = 0.5f * (gL + gR), gs = 0.5f * (gL - gR) * p.gritWidth;
             gL = (gm + gs) * gGate; gR = (gm - gs) * gGate;
             if (useSample[GritL])
-            {
-                readSample (*samples[GritL], samplePos[GritL], sRate[GritL], sl, sr_);
-                gL = sl * p.sampleGain[GritL]; gR = sr_ * p.sampleGain[GritL];
-            }
+                playSample (GritL, gL, gR);
 
             // Ende: harter Schnitt mit kurzer Blende
             float endGain = 1.0f;
@@ -356,12 +388,14 @@ struct IndustrialEngine::Voice
 
             const float g = endGain * fg * velGain;
             float sL = 0.0f, sR = 0.0f;
-            if (solo < 0 || solo == ClickL)  { sL += clickL  * p.clickLevel;  sR += clickR  * p.clickLevel; }
-            if (solo < 0 || solo == PunchL)  { sL += punchL  * p.punchLevel;  sR += punchR  * p.punchLevel; }
-            if (solo < 0 || solo == RumbleL) { sL += rumbleL * p.rumbleLevel; sR += rumbleR * p.rumbleLevel; }
-            if (solo < 0 || solo == GritL)   { sL += gL * p.gritLevel;        sR += gR * p.gritLevel; }
+            if (solo < 0 || solo == ClickL)  { sL += clickL  * lvl[ClickL];  sR += clickR  * lvl[ClickL]; }
+            if (solo < 0 || solo == PunchL)  { sL += punchL  * lvl[PunchL];  sR += punchR  * lvl[PunchL]; }
+            if (solo < 0 || solo == RumbleL) { sL += rumbleL * lvl[RumbleL]; sR += rumbleR * lvl[RumbleL]; }
+            if (solo < 0 || solo == GritL)   { sL += gL * lvl[GritL];        sR += gR * lvl[GritL]; }
 
-            const float relOut = (solo < 0 || solo == PunchL) ? rel * fg * velGain : 0.0f;
+            // Nachklang gehört zum synthetischen Punch (bei Punch-Sample oder Punch aus: keiner)
+            const bool relOn = ! useSample[PunchL] && p.layerOn[PunchL] >= 0.5f;
+            const float relOut = (relOn && (solo < 0 || solo == PunchL)) ? rel * fg * velGain : 0.0f;
             outL[i] += sL * g + relOut;
             outR[i] += sR * g + relOut;
         }

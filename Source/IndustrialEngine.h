@@ -85,6 +85,10 @@ namespace kf
         float layerMode[4]        { 0, 0, 0, 0 };
         float sampleGain[4]       { 1, 1, 1, 1 };
         float samplePitchSemi[4]  { 0, 0, 0, 0 };
+        float layerOn[4]          { 1, 1, 1, 1 };   // Schicht an/aus (beide Modi)
+        float sampleOffsetMs[4]   { 0, 0, 0, 0 };   // < 0: Anfang überspringen, > 0: verzögert starten
+        float sampleDecayMs[4]    { 1000, 1000, 1000, 1000 };   // Ausklingen bis -60 dB; >= 1000 = aus
+        float sampleDrive[4]      { 0, 0, 0, 0 };   // Sättigung pro Sample-Schicht
     };
 
     // Ein geladenes Sample (Stereo) mit seiner Original-Abtastrate

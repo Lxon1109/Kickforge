@@ -5,6 +5,7 @@
 #include "IndustrialEngine.h"
 #include "ParamTable.h"
 #include "Presets.h"
+#include "SampleLibrary.h"
 
 /*
     Kickforge v0.7 — Processor
@@ -13,7 +14,8 @@
       • MIDI: jede Note triggert, sample-genau; optional bestimmt die Note den Grundton
       • Pro Schicht ein Sample-Slot (Synth ↔ Sample)
 */
-class KickforgeAudioProcessor : public juce::AudioProcessor
+class KickforgeAudioProcessor : public juce::AudioProcessor,
+                                private juce::Timer
 {
 public:
     KickforgeAudioProcessor();
@@ -60,6 +62,19 @@ public:
     bool loadLayerSample (int layer, const juce::File& file);   // schaltet die Schicht auf SAMPLE
     void clearLayerSample (int layer);                          // schaltet zurück auf SYNTH
     juce::String getLayerSamplePath (int layer) const;
+    juce::String getLayerSampleName (int layer) const;          // Anzeigename (Bibliothek) oder Dateiname
+
+    // ---- Bibliothek (Teknovault Kick Builder o. ä.) ----
+    kf::SampleLibrary& getLibrary() { return *library; }
+    bool loadLibraryEntry (int layer, int entryIndex);           // lädt, schaltet auf SAMPLE, spielt ggf. ab
+    void stepLayerSample (int layer, int delta);                 // ◀ ▶ innerhalb der Schicht
+    void randomLayerSample (int layer);
+    bool loadKit (int kitIndex);                                 // alle Schichten eines Kits
+    void stepKit (int delta);
+    void randomKick();                                           // zufällige Kombination (KEY LOCK an)
+    int  getCurrentKit() const { return currentKit; }
+    float getLayerRootHz (int layer) const;                      // erkannter Grundton des Samples (0 = unbekannt)
+    float getKeyLockShift (int layer) const;                     // Halbtöne durch KEY LOCK
 
     // Peak seit dem letzten Aufruf (Output-Anzeige)
     float takeOutputPeak() { return outputPeak.exchange (0.0f); }
@@ -86,6 +101,21 @@ private:
     std::atomic<float>* sPitchRaw[4] {};
     std::atomic<float>* syncRaw = nullptr;
     std::atomic<float>* keytrackRaw = nullptr;
+    std::atomic<float>* onRaw[4] {};
+    std::atomic<float>* sOffRaw[4] {};
+    std::atomic<float>* sDecRaw[4] {};
+    std::atomic<float>* sDrvRaw[4] {};
+    std::atomic<float>* keylockRaw = nullptr;
+    std::atomic<float>* autoplayRaw = nullptr;
+    std::atomic<float>* fEndRaw = nullptr;
+
+    juce::SharedResourcePointer<kf::SampleLibrary> library;
+    std::atomic<float> layerRoot[4] { 0.0f, 0.0f, 0.0f, 0.0f };
+    int currentKit = -1;
+    juce::Random rng;
+    juce::String pendingRelink[4];   // Dateinamen, die nach dem Bibliotheks-Scan neu gesucht werden
+    void timerCallback() override;
+    void autoplay() { if (autoplayRaw->load() >= 0.5f) triggerAudition(); }
 
     std::atomic<double> hostBpm { 0.0 };
     std::atomic<bool>   auditionPending { false };

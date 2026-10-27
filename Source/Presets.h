@@ -129,6 +129,10 @@ private:
             set (params::srcId (l), 0.0f);
             set (params::sGainId (l), 1.0f);
             set (params::sPitchId (l), 0.0f);
+            set (params::onId (l), 1.0f);
+            set (params::sOffId (l), 0.0f);
+            set (params::sDecId (l), 1000.0f);
+            set (params::sDrvId (l), 0.0f);
         }
         return true;
     }

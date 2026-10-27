@@ -11,7 +11,8 @@ namespace layout
     constexpr int height  = 846;
     constexpr int pad     = 14;
     constexpr int gap     = 8;
-    constexpr int vizY    = 66,  vizH    = 128;
+    constexpr int libY    = 66,  libH    = 30;
+    constexpr int vizY    = 102, vizH    = 94;
     constexpr int layersY = 204, layersH = 428;
     constexpr int bottomY = 640;
     constexpr int clickW  = 204;
@@ -76,6 +77,7 @@ KickforgeAudioProcessorEditor::KickforgeAudioProcessorEditor (KickforgeAudioProc
 {
     buildBackgroundTexture();
     buildHeader();
+    buildLibraryBar();
     buildPanels();
     addAndMakeVisible (visualizer);
 
@@ -83,7 +85,8 @@ KickforgeAudioProcessorEditor::KickforgeAudioProcessorEditor (KickforgeAudioProc
     setResizable (false, false);
     setSize (layout::width, layout::height);   // erst am Ende: triggert resized()
 
-    updateSampleSlots();
+    updateLayerPanels();
+    updateLibraryBar();
     updateTempoInfo();
     renderVisualizer();
     startTimerHz (30);
@@ -123,30 +126,104 @@ void KickforgeAudioProcessorEditor::buildHeader()
     triggerBtn   .onClick = [this] { proc.triggerAudition(); };
 }
 
-void KickforgeAudioProcessorEditor::buildSampleSlot (Panel& p)
+void KickforgeAudioProcessorEditor::setParam (const juce::String& id, float value)
+{
+    if (auto* prm = proc.apvts.getParameter (id))
+    {
+        prm->beginChangeGesture();
+        prm->setValueNotifyingHost (prm->convertTo0to1 (value));
+        prm->endChangeGesture();
+    }
+}
+
+void KickforgeAudioProcessorEditor::buildLibraryBar()
+{
+    using namespace juce;
+    libStatus.setFont (lnf.fonts().get (W::SemiBold, 12.0f, 0.04f));
+    libStatus.setColour (Label::textColourId, T::text.withAlpha (0.8f));
+    libStatus.setJustificationType (Justification::centredLeft);
+    libStatus.setMinimumHorizontalScale (0.75f);
+    addAndMakeVisible (libStatus);
+
+    kitPrevBtn.setButtonText (String::fromUTF8 ("\xe2\x97\x80"));
+    kitNextBtn.setButtonText (String::fromUTF8 ("\xe2\x96\xb6"));
+    kitNameBtn.getProperties().set ("align", "left");
+    kitPrevBtn.setTooltip ("Vorheriges Kit (alle vier Schichten passend)");
+    kitNextBtn.setTooltip (String::fromUTF8 ("N\xc3\xa4" "chstes Kit"));
+    kitNameBtn.setTooltip (String::fromUTF8 ("Kit w\xc3\xa4hlen"));
+    randomKickBtn.setTooltip (String::fromUTF8 ("Zuf\xc3\xa4llige Kombination aus der Bibliothek, KEY LOCK h\xc3\xa4lt alles in einer Tonart"));
+    randomKickBtn.getProperties().set ("primary", true);
+    libMenuBtn.setTooltip ("Ordner der Sample-Bibliothek verwalten");
+
+    kitPrevBtn.onClick    = [this] { proc.stepKit (-1); updateLayerPanels(); updateLibraryBar(); };
+    kitNextBtn.onClick    = [this] { proc.stepKit (+1); updateLayerPanels(); updateLibraryBar(); };
+    kitNameBtn.onClick    = [this] { showKitMenu(); };
+    randomKickBtn.onClick = [this] { proc.randomKick(); updateLayerPanels(); updateLibraryBar(); };
+    libMenuBtn.onClick    = [this] { showLibraryMenu(); };
+    for (auto* b : { &libMenuBtn, &kitPrevBtn, &kitNextBtn, &kitNameBtn, &randomKickBtn }) addAndMakeVisible (*b);
+
+    keylockToggle  = makeToggle (keylockId,  "KEY LOCK",  T::brand);
+    autoplayToggle = makeToggle (autoplayId, "AUTO-PLAY", T::brand);
+    keylockToggle->button.setTooltip ("Punch- und Rumble-Samples automatisch auf den KEY stimmen");
+    autoplayToggle->button.setTooltip (String::fromUTF8 ("Beim Durchbl\xc3\xa4ttern sofort abspielen"));
+}
+
+void KickforgeAudioProcessorEditor::buildLayerControls (Panel& p)
 {
     using namespace juce;
     const int l = p.layer;
-    p.sampleToggle = makeToggle (srcId (l), "SAMPLE", p.accent);
+    const auto arrowL = String::fromUTF8 ("\xe2\x97\x80"), arrowR = String::fromUTF8 ("\xe2\x96\xb6");
 
-    p.loadBtn  = std::make_unique<TextButton> ("LOAD");
-    p.clearBtn = std::make_unique<TextButton> (String::fromUTF8 ("\xe2\x9c\x95"));   // ✕
-    p.loadBtn ->setTooltip ("WAV/AIFF/FLAC laden (oder Datei auf die Schicht ziehen)");
-    p.clearBtn->setTooltip ("Sample entfernen");
-    p.loadBtn ->onClick = [this, l] { onLoadSampleClicked (l); };
-    p.clearBtn->onClick = [this, l] { proc.clearLayerSample (l); updateSampleSlots(); };
-    addAndMakeVisible (*p.loadBtn);
-    addAndMakeVisible (*p.clearBtn);
+    p.onToggle = makeToggle (onId (l), "ON", p.accent);
+    p.onToggle->button.setTooltip ("Schicht an/aus");
 
-    p.sampleName = std::make_unique<Label>();
-    p.sampleName->setFont (lnf.fonts().get (W::SemiBold, 11.5f, 0.02f));
-    p.sampleName->setColour (Label::textColourId, T::dim);
-    p.sampleName->setJustificationType (Justification::centredLeft);
-    p.sampleName->setMinimumHorizontalScale (0.7f);
-    addAndMakeVisible (*p.sampleName);
+    // Quelle: SYNTH | SAMPLE
+    for (auto* b : { &p.synthBtn, &p.sampleBtn })
+    {
+        b->setClickingTogglesState (false);
+        b->setColour (TextButton::buttonOnColourId, p.accent);
+        addAndMakeVisible (*b);
+    }
+    p.synthBtn .onClick = [this, l] { setParam (srcId (l), 0.0f); updateLayerPanels(); };
+    p.sampleBtn.onClick = [this, l] { setParam (srcId (l), 1.0f); updateLayerPanels(); };
+    p.synthBtn .setTooltip ("Synthese (Kickforge-Engine)");
+    p.sampleBtn.setTooltip ("Sample aus der Bibliothek oder eigene Datei");
 
-    p.sGain  = makeKnob (sGainId (l),  "GAIN",  p.accent, KnobSize::Small);
-    p.sPitch = makeKnob (sPitchId (l), "PITCH", p.accent, KnobSize::Small, true);
+    p.clearBtn.setButtonText (String::fromUTF8 ("\xe2\x9c\x95"));   // ✕
+    p.loadBtn .setTooltip ("Eigene WAV/AIFF/FLAC laden (oder Datei auf die Schicht ziehen)");
+    p.clearBtn.setTooltip ("Sample entfernen");
+    p.loadBtn .onClick = [this, l] { onLoadSampleClicked (l); };
+    p.clearBtn.onClick = [this, l] { proc.clearLayerSample (l); updateLayerPanels(); };
+    addAndMakeVisible (p.loadBtn);
+    addAndMakeVisible (p.clearBtn);
+
+    // Bibliothek: ◀ Name ▶ Würfel
+    p.prevBtn.setButtonText (arrowL);
+    p.nextBtn.setButtonText (arrowR);
+    p.randBtn.setButtonText ("RND");
+    p.prevBtn.setTooltip ("Vorheriges Sample dieser Schicht");
+    p.nextBtn.setTooltip (juce::String::fromUTF8 ("N\xc3\xa4" "chstes Sample dieser Schicht"));
+    p.randBtn.setTooltip (String::fromUTF8 ("Zuf\xc3\xa4lliges Sample dieser Schicht"));
+    p.nameBtn.setTooltip (String::fromUTF8 ("Sample aus der Bibliothek w\xc3\xa4hlen"));
+    p.nameBtn.getProperties().set ("align", "left");
+    p.prevBtn.onClick = [this, l] { proc.stepLayerSample (l, -1); updateLayerPanels(); };
+    p.nextBtn.onClick = [this, l] { proc.stepLayerSample (l, +1); updateLayerPanels(); };
+    p.randBtn.onClick = [this, l] { proc.randomLayerSample (l);   updateLayerPanels(); };
+    p.nameBtn.onClick = [this, l] { showSampleMenu (l); };
+    for (auto* b : { &p.prevBtn, &p.nextBtn, &p.randBtn, &p.nameBtn }) addAndMakeVisible (*b);
+
+    p.info.setFont (lnf.fonts().get (W::SemiBold, 11.0f, 0.06f));
+    p.info.setColour (Label::textColourId, T::dim);
+    p.info.setJustificationType (Justification::centred);
+    p.info.setInterceptsMouseClicks (false, false);
+    addAndMakeVisible (p.info);
+
+    // Sample-Regler
+    p.sBig.push_back (makeKnob (sGainId (l),  "GAIN",   p.accent, KnobSize::Big));
+    p.sBig.push_back (makeKnob (sPitchId (l), "PITCH",  p.accent, KnobSize::Big, true));
+    p.sMed.push_back (makeKnob (sDrvId (l),   "DRIVE",  p.accent, KnobSize::Med));
+    p.sMed.push_back (makeKnob (sOffId (l),   "OFFSET", p.accent, KnobSize::Med));
+    p.sMed.push_back (makeKnob (sDecId (l),   "DECAY",  p.accent, KnobSize::Med));
 }
 
 void KickforgeAudioProcessorEditor::buildPanels()
@@ -195,7 +272,7 @@ void KickforgeAudioProcessorEditor::buildPanels()
 
     // ---------- 04 GRIT ----------
     auto& gr = gritP; const auto cG = T::grit;
-    gr.index = "04"; gr.title = "GRIT"; gr.accent = cG; gr.layer = 3;
+    gr.index = "04"; gr.title = "TOP / GRIT"; gr.accent = cG; gr.layer = 3;
     add (gr.big,   "gritLevel",   "LEVEL",  cG, KS::Big);
     add (gr.big,   "gritDrive",   "DRIVE",  cG, KS::Big);
     add (gr.big,   "gritNoise",   "NOISE",  cG, KS::Big);
@@ -206,7 +283,7 @@ void KickforgeAudioProcessorEditor::buildPanels()
     add (gr.small, "gritWidth",   "WIDTH",  cG, KS::Small);
 
     for (auto* p : { &clickP, &punchP, &rumbleP, &gritP })
-        buildSampleSlot (*p);
+        buildLayerControls (*p);
 
     // ---------- 05 KICK (global) ----------
     auto& k = kickP; const auto cK = T::global;
@@ -221,7 +298,7 @@ void KickforgeAudioProcessorEditor::buildPanels()
     add (k.med, "bpm",          "TEMPO",     cK, KS::Med);
     syncToggle     = makeToggle (syncId,     "HOST SYNC", cK);
     keytrackToggle = makeToggle (keytrackId, "KEY TRACK", cK);
-    syncToggle->button.setTooltip ("Kick-Länge folgt dem Tempo der DAW");
+    syncToggle->button.setTooltip (juce::String::fromUTF8 ("Kick-L\xc3\xa4nge folgt dem Tempo der DAW"));
     keytrackToggle->button.setTooltip ("Die gespielte MIDI-Note bestimmt den Grundton");
     tempoInfo.setFont (lnf.fonts().get (W::SemiBold, 11.5f, 0.06f));
     tempoInfo.setColour (juce::Label::textColourId, T::dim);
@@ -274,9 +351,17 @@ void KickforgeAudioProcessorEditor::timerCallback()
     {
         lastChange = c;
         vizDirty = true;
-        updateSampleSlots();
+        updateLayerPanels();
+        updateLibraryBar();
         updateTempoInfo();
         presetCombo.setTextWhenNothingSelected (proc.getPresetManager().getCurrentName());
+    }
+    const auto lv = proc.getLibrary().getVersion();
+    if (lv != lastLibVersion || (tickCount % 15 == 0 && proc.getLibrary().isScanning()))
+    {
+        lastLibVersion = lv;
+        updateLibraryBar();
+        updateLayerPanels();
     }
     if (tickCount % 15 == 0) updateTempoInfo();   // Host-Tempo kann sich ändern
 
@@ -426,40 +511,201 @@ void KickforgeAudioProcessorEditor::onExportClicked()
 void KickforgeAudioProcessorEditor::onLoadSampleClicked (int layer)
 {
     const auto prev = proc.getLayerSamplePath (layer);
-    const auto start = prev.isNotEmpty() ? juce::File (prev).getParentDirectory()
-                                         : juce::File::getSpecialLocation (juce::File::userDesktopDirectory);
+    auto start = prev.isNotEmpty() ? juce::File (prev).getParentDirectory()
+                                   : juce::File::getSpecialLocation (juce::File::userDesktopDirectory);
     fileChooser = std::make_unique<juce::FileChooser> ("Sample laden", start, "*.wav;*.aif;*.aiff;*.flac;*.ogg;*.mp3");
     fileChooser->launchAsync (juce::FileBrowserComponent::openMode | juce::FileBrowserComponent::canSelectFiles,
         [this, layer] (const juce::FileChooser& fc)
         {
             auto file = fc.getResult();
             if (file != juce::File() && proc.loadLayerSample (layer, file))
-                updateSampleSlots();
+            {
+                updateLayerPanels();
+                if (proc.apvts.getRawParameterValue (autoplayId)->load() >= 0.5f) proc.triggerAudition();
+            }
         });
 }
 
-void KickforgeAudioProcessorEditor::updateSampleSlots()
+void KickforgeAudioProcessorEditor::showSampleMenu (int layer)
 {
+    using namespace juce;
+    auto& lib = proc.getLibrary();
+    const auto list = lib.entriesForLayer (layer);
+    const auto entries = lib.getEntries();
+    const int cur = lib.indexOfFile (File (proc.getLayerSamplePath (layer)));
+
+    PopupMenu menu;
+    if (list.empty())
+    {
+        menu.addItem (1, lib.getStatusText(), false);
+        menu.addItem (2, String::fromUTF8 ("Bibliotheksordner w\xc3\xa4hlen\xe2\x80\xa6"));
+    }
+    else
+    {
+        // Gruppen (Unterordner) als Untermenüs, große Gruppen in 25er-Blöcken
+        String group; PopupMenu sub; int inGroup = 0; std::vector<std::pair<String, PopupMenu>> groups;
+        auto flush = [&] { if (inGroup > 0) groups.push_back ({ group, sub }); sub = PopupMenu(); inGroup = 0; };
+        for (int idx : list)
+        {
+            const auto& e = entries[(size_t) idx];
+            if (e.group != group) { flush(); group = e.group; }
+            String label = e.display;
+            if (e.rootHz > 0.0f) label << "   " << noteName (e.rootHz);
+            sub.addItem (1000 + idx, label, true, idx == cur);
+            ++inGroup;
+        }
+        flush();
+        for (auto& [name, m] : groups)
+            menu.addSubMenu (name + "  (" + String (m.getNumItems()) + ")", m);
+    }
+    menu.showMenuAsync (PopupMenu::Options().withTargetComponent (&layerPanel (layer)->nameBtn)
+                                            .withMaximumNumColumns (4),
+        [this, layer] (int r)
+        {
+            if (r == 2) { showLibraryMenu(); return; }
+            if (r >= 1000) { proc.loadLibraryEntry (layer, r - 1000); updateLayerPanels(); }
+        });
+}
+
+void KickforgeAudioProcessorEditor::showKitMenu()
+{
+    using namespace juce;
+    const auto kits = proc.getLibrary().getKits();
+    PopupMenu menu;
+    if (kits.empty()) menu.addItem (1, "Keine Kits in der Bibliothek", false);
+    // Blöcke zu 20 Kits als Untermenüs
+    PopupMenu sub; String first; int count = 0;
+    auto flush = [&] (const String& last)
+    {
+        if (count > 0) menu.addSubMenu (first + String::fromUTF8 (" \xe2\x80\x93 ") + last, sub);
+        sub = PopupMenu(); count = 0;
+    };
+    String lastName, lastFamily;
+    for (int i = 0; i < (int) kits.size(); ++i)
+    {
+        const auto family = kits[(size_t) i].name.upToLastOccurrenceOf (" ", false, false);
+        if (count == 20 || (count > 0 && family != lastFamily)) flush (lastName);
+        if (count == 0) first = kits[(size_t) i].name;
+        String label = kits[(size_t) i].name;
+        if (kits[(size_t) i].rootHz > 0.0f) label << "   " << noteName (kits[(size_t) i].rootHz);
+        sub.addItem (100 + i, label, true, i == proc.getCurrentKit());
+        lastName = kits[(size_t) i].name; lastFamily = family; ++count;
+    }
+    flush (lastName);
+    menu.showMenuAsync (PopupMenu::Options().withTargetComponent (&kitNameBtn),
+        [this] (int r)
+        {
+            if (r >= 100) { proc.loadKit (r - 100); updateLayerPanels(); updateLibraryBar(); }
+        });
+}
+
+void KickforgeAudioProcessorEditor::showLibraryMenu()
+{
+    using namespace juce;
+    const auto roots = proc.getLibrary().getRoots();
+    PopupMenu menu;
+    menu.addItem (1, String::fromUTF8 ("Ordner hinzuf\xc3\xbc" "gen\xe2\x80\xa6"));
+    menu.addItem (2, "Neu einlesen", ! roots.isEmpty());
+    if (! roots.isEmpty())
+    {
+        menu.addSeparator();
+        menu.addSectionHeader ("ORDNER");
+        for (int i = 0; i < roots.size(); ++i)
+        {
+            PopupMenu sub;
+            sub.addItem (100 + i, "Aus der Bibliothek entfernen");
+            menu.addSubMenu (File (roots[i]).getFileName(), sub);
+        }
+    }
+    menu.showMenuAsync (PopupMenu::Options().withTargetComponent (&libMenuBtn),
+        [this, roots] (int r)
+        {
+            auto& lib = proc.getLibrary();
+            if (r == 1)
+            {
+                fileChooser = std::make_unique<FileChooser> (String::fromUTF8 ("Sample-Ordner w\xc3\xa4hlen (z. B. Teknovault Kick Builder)"),
+                                                             File::getSpecialLocation (File::userHomeDirectory).getChildFile ("Downloads"));
+                fileChooser->launchAsync (FileBrowserComponent::openMode | FileBrowserComponent::canSelectDirectories,
+                    [this] (const FileChooser& fc)
+                    {
+                        const auto dir = fc.getResult();
+                        if (dir.isDirectory()) { proc.getLibrary().addRoot (dir); updateLibraryBar(); }
+                    });
+            }
+            else if (r == 2) lib.rescan();
+            else if (r >= 100 && r - 100 < roots.size())
+            {
+                auto rr = roots;
+                rr.remove (r - 100);
+                lib.setRoots (rr);
+            }
+            updateLibraryBar();
+        });
+}
+
+void KickforgeAudioProcessorEditor::updateLayerPanels()
+{
+    auto& lib = proc.getLibrary();
+    const bool libEmpty = lib.getEntries().empty();
     for (int l = 0; l < 4; ++l)
     {
         auto& p = *layerPanel (l);
         const auto path = proc.getLayerSamplePath (l);
-        const bool hasSample = path.isNotEmpty();
+        const bool hasSample  = path.isNotEmpty();
         const bool sampleMode = proc.apvts.getRawParameterValue (srcId (l))->load() >= 0.5f;
-        const bool active = sampleMode && hasSample;
+        const bool on = proc.apvts.getRawParameterValue (onId (l))->load() >= 0.5f;
 
-        p.sampleName->setText (hasSample ? juce::File (path).getFileNameWithoutExtension()
-                                         : (sampleMode ? juce::String ("kein Sample - Synth aktiv")
-                                                       : juce::String ("kein Sample")),
-                               juce::dontSendNotification);
-        p.sampleName->setColour (juce::Label::textColourId, active ? T::text.withAlpha (0.85f) : T::dim);
-        p.clearBtn->setEnabled (hasSample);
+        p.sampleView = sampleMode;
+        p.synthBtn .setToggleState (! sampleMode, juce::dontSendNotification);
+        p.sampleBtn.setToggleState (sampleMode,   juce::dontSendNotification);
+        for (auto* v : { &p.big, &p.med, &p.small }) for (auto& k : *v) { k->setVisible (! sampleMode); k->setDimmed (! on); }
+        for (auto* v : { &p.sBig, &p.sMed })         for (auto& k : *v) { k->setVisible (sampleMode);   k->setDimmed (! on); }
 
-        for (auto* v : { &p.big, &p.med, &p.small })
-            for (auto& k : *v) k->setDimmed (active);
-        p.sGain ->setDimmed (! active);
-        p.sPitch->setDimmed (! active);
+        juce::String name;
+        if (hasSample) name = proc.getLayerSampleName (l);
+        else if (lib.isScanning()) name = juce::String::fromUTF8 ("Bibliothek wird eingelesen\xe2\x80\xa6");
+        else if (libEmpty) name = juce::String::fromUTF8 ("Keine Bibliothek \xe2\x80\x93 oben w\xc3\xa4hlen");
+        else name = juce::String::fromUTF8 ("Sample w\xc3\xa4hlen \xe2\x96\xbe");
+        p.nameBtn.setButtonText (name);
+        p.clearBtn.setEnabled (hasSample);
+        for (auto* b : { &p.prevBtn, &p.nextBtn, &p.randBtn }) b->setEnabled (! libEmpty);
+
+        // Info: Grundton + KEY LOCK
+        juce::String info;
+        if (sampleMode)
+        {
+            if (! hasSample) info = "kein Sample - Synth aktiv";
+            else
+            {
+                const float root = proc.getLayerRootHz (l);
+                if (root > 0.0f) info << "GRUNDTON " << noteName (root);
+                const float sh = proc.getKeyLockShift (l);
+                if (std::abs (sh) > 0.05f) info << (info.isEmpty() ? juce::String() : juce::String::fromUTF8 ("  \xc2\xb7  ")) << "KEY LOCK " << (sh > 0 ? "+" : "") << juce::String (sh, 1) << " st";
+            }
+        }
+        p.info.setText (info, juce::dontSendNotification);
+        p.info.setVisible (sampleMode);
     }
+    repaint();
+}
+
+void KickforgeAudioProcessorEditor::updateLibraryBar()
+{
+    auto& lib = proc.getLibrary();
+    const auto roots = lib.getRoots();
+    juce::String s = lib.getStatusText();
+    if (! roots.isEmpty() && ! lib.isScanning())
+        s = juce::File (roots[0]).getFileName() + (roots.size() > 1 ? " +" + juce::String (roots.size() - 1) : juce::String())
+          + juce::String::fromUTF8 ("  \xc2\xb7  ") + s;
+    libStatus.setText (s, juce::dontSendNotification);
+
+    const auto kits = lib.getKits();
+    const int k = proc.getCurrentKit();
+    kitNameBtn.setButtonText (juce::isPositiveAndBelow (k, (int) kits.size()) ? kits[(size_t) k].name
+                              : (kits.empty() ? juce::String ("KEINE KITS") : juce::String::fromUTF8 ("KIT W\xc3\x84HLEN \xe2\x96\xbe")));
+    const bool hasKits = ! kits.empty();
+    for (auto* b : { &kitPrevBtn, &kitNextBtn, &kitNameBtn }) b->setEnabled (hasKits);
+    randomKickBtn.setEnabled (! lib.getEntries().empty());
 }
 
 void KickforgeAudioProcessorEditor::updateTempoInfo()
@@ -490,7 +736,7 @@ void KickforgeAudioProcessorEditor::filesDropped (const juce::StringArray& files
     if (auto* p = panelAt ({ x, y }))
         for (auto& f : files)
             if (proc.loadLayerSample (p->layer, juce::File (f))) break;
-    updateSampleSlots();
+    updateLayerPanels();
     repaint();
 }
 
@@ -649,6 +895,22 @@ void KickforgeAudioProcessorEditor::paint (juce::Graphics& g)
     drawScrew (g, { W_ - 7.0f, H_ - 7.0f }, 0.2f);
 
     drawHeader (g);
+
+    // Bibliotheks-Leiste: eingelassene Platte mit Beschriftungen
+    {
+        const auto plate = T::chamferRect (libBar.toFloat().reduced (0.5f), 7.0f);
+        g.setColour (T::recess);
+        g.fillPath (plate);
+        g.setColour (T::edge);
+        g.strokePath (plate, juce::PathStrokeType (1.0f));
+        g.setFont (lnf.fonts().get (W::Bold, 10.5f, 0.18f));
+        g.setColour (T::brand);
+        g.drawText ("LIBRARY", libBar.withTrimmedLeft (14).withWidth (70), juce::Justification::centredLeft, false);
+        g.setColour (T::dim);
+        g.drawText ("KIT", juce::Rectangle<int> (kitPrevBtn.getX() - 34, libBar.getY(), 30, libBar.getHeight()),
+                    juce::Justification::centredRight, false);
+    }
+
     for (auto* p : { &clickP, &punchP, &rumbleP, &gritP, &kickP, &masterP })
         drawPanel (g, *p);
 
@@ -717,52 +979,59 @@ void KickforgeAudioProcessorEditor::layoutRow (std::vector<std::unique_ptr<Knob>
     for (auto& k : knobs) placeKnob (*k, r.removeFromLeft (cellW));
 }
 
-void KickforgeAudioProcessorEditor::layoutSampleSlot (Panel& p, juce::Rectangle<int> area, bool stacked)
-{
-    juce::Rectangle<int> knobs;
-    if (stacked) knobs = area.removeFromBottom (72);
-    else         knobs = area.removeFromRight (124);
-
-    auto line1 = area.removeFromTop (24);
-    p.sampleToggle->button.setBounds (line1.removeFromLeft (92));
-    line1.removeFromLeft (4);
-    p.clearBtn->setBounds (line1.removeFromRight (26));
-    line1.removeFromRight (4);
-    p.loadBtn->setBounds (line1.removeFromRight (56));
-    area.removeFromTop (6);
-    p.sampleName->setBounds (area.removeFromTop (18));
-
-    const int w = knobs.getWidth() / 2;
-    placeKnob (*p.sGain,  knobs.removeFromLeft (w));
-    placeKnob (*p.sPitch, knobs);
-}
-
 void KickforgeAudioProcessorEditor::layoutLayerPanel (Panel& p)
 {
+    p.onToggle->button.setBounds (p.bounds.getRight() - 14 - 54, p.bounds.getY() + 8, 54, 20);
     auto inner = p.bounds.withTrimmedTop (38).reduced (12, 6);
     const bool narrow = p.bounds.getWidth() < 260;
 
-    layoutRow (p.big, inner.removeFromTop (108), 3);
-    inner.removeFromTop (2);
-    layoutRow (p.med, inner.removeFromTop (82), narrow ? 2 : 4);
-    inner.removeFromTop (2);
-    if (! narrow)
-    {
-        layoutRow (p.small, inner.removeFromTop (70), 5);
-        inner.removeFromTop (4);
-    }
+    // Zeile 1: SYNTH | SAMPLE   …   LOAD ✕
+    auto r1 = inner.removeFromTop (24);
+    p.synthBtn .setBounds (r1.removeFromLeft (narrow ? 58 : 66));
+    r1.removeFromLeft (2);
+    p.sampleBtn.setBounds (r1.removeFromLeft (narrow ? 64 : 72));
+    p.clearBtn.setBounds (r1.removeFromRight (26));
+    r1.removeFromRight (4);
+    if (! narrow) p.loadBtn.setBounds (r1.removeFromRight (54));
+    else          p.loadBtn.setBounds ({});
+    inner.removeFromTop (6);
 
-    // Sample-Slot unten
-    const int slotH = narrow ? 128 : 76;
-    auto slot = inner.removeFromBottom (slotH);
-    p.dividerY = slot.getY() - 8;
-    layoutSampleSlot (p, slot, narrow);
+    // Zeile 2: ◀ Name ▶ RND
+    auto r2 = inner.removeFromTop (26);
+    p.prevBtn.setBounds (r2.removeFromLeft (26));
+    r2.removeFromLeft (3);
+    p.randBtn.setBounds (r2.removeFromRight (narrow ? 36 : 42));
+    r2.removeFromRight (3);
+    p.nextBtn.setBounds (r2.removeFromRight (26));
+    r2.removeFromRight (3);
+    p.nameBtn.setBounds (r2);
+    inner.removeFromTop (8);
+    p.dividerY = inner.getY() - 4;
+
+    // Synth-Regler
+    {
+        auto c = inner;
+        layoutRow (p.big, c.removeFromTop (108), 3);
+        c.removeFromTop (2);
+        layoutRow (p.med, c.removeFromTop (82), narrow ? 2 : 4);
+        c.removeFromTop (2);
+        if (! narrow) layoutRow (p.small, c.removeFromTop (70), 5);
+    }
+    // Sample-Regler
+    {
+        auto c = inner;
+        layoutRow (p.sBig, c.removeFromTop (108), narrow ? 2 : 3);
+        c.removeFromTop (2);
+        layoutRow (p.sMed, c.removeFromTop (82), 3);
+        c.removeFromTop (6);
+        p.info.setBounds (c.removeFromTop (18));
+    }
 }
 
 void KickforgeAudioProcessorEditor::resized()
 {
     using namespace layout;
-    if (masterP.big.size() < 3 || kickP.med.size() < 6 || gritP.sGain == nullptr) return;
+    if (masterP.big.size() < 3 || kickP.med.size() < 6 || gritP.sMed.size() < 3 || keylockToggle == nullptr) return;
 
     const int W_ = getWidth();
     const int availW = W_ - pad * 2;
@@ -783,6 +1052,28 @@ void KickforgeAudioProcessorEditor::resized()
     exportBtn .setBounds (W_ - pad - 140 - gap - 128, 12, 128, 38);
 
     visualizer.setBounds (pad, vizY, availW, vizH);
+
+    // ---- Bibliotheks-Leiste ----
+    libBar = { pad, libY, availW, libH };
+    {
+        auto r = libBar.reduced (6, 3);
+        r.removeFromLeft (78);                                   // "LIBRARY"-Beschriftung (gezeichnet)
+        libMenuBtn.setBounds (r.removeFromLeft (118));
+        r.removeFromLeft (10);
+        autoplayToggle->button.setBounds (r.removeFromRight (112));
+        r.removeFromRight (6);
+        keylockToggle->button.setBounds (r.removeFromRight (104));
+        r.removeFromRight (12);
+        randomKickBtn.setBounds (r.removeFromRight (92));
+        r.removeFromRight (12);
+        kitNextBtn.setBounds (r.removeFromRight (26));
+        r.removeFromRight (3);
+        kitNameBtn.setBounds (r.removeFromRight (150));
+        r.removeFromRight (3);
+        kitPrevBtn.setBounds (r.removeFromRight (26));
+        r.removeFromRight (36);                                  // "KIT"-Beschriftung (gezeichnet)
+        libStatus.setBounds (r);
+    }
 
     // ---- Schichten ----
     const int restW = availW - clickW - 3 * gap;

@@ -1,5 +1,6 @@
 #include "PluginProcessor.h"
 #include "PluginEditor.h"
+#include <algorithm>
 
 using namespace kf::params;
 
@@ -59,8 +60,26 @@ juce::AudioProcessorValueTreeState::ParameterLayout KickforgeAudioProcessor::cre
                                                                   attrs (Unit::Semi)));
     }
 
+    for (int l = 0; l < 4; ++l)
+    {
+        const juce::String ln (layerNames[l]);
+        p.push_back (std::make_unique<juce::AudioParameterBool> (juce::ParameterID { onId (l), 1 }, ln + " On", true));
+        p.push_back (std::make_unique<juce::AudioParameterFloat> (juce::ParameterID { sOffId (l), 1 }, ln + " Sample Offset",
+                                                                  juce::NormalisableRange<float> (-50.0f, 100.0f, 0.0f), 0.0f,
+                                                                  attrs (Unit::MsBip)));
+        juce::NormalisableRange<float> dec (20.0f, 1000.0f, 0.0f);
+        dec.setSkewForCentre (250.0f);
+        p.push_back (std::make_unique<juce::AudioParameterFloat> (juce::ParameterID { sDecId (l), 1 }, ln + " Sample Decay",
+                                                                  dec, 1000.0f, attrs (Unit::DecayMs)));
+        p.push_back (std::make_unique<juce::AudioParameterFloat> (juce::ParameterID { sDrvId (l), 1 }, ln + " Sample Drive",
+                                                                  juce::NormalisableRange<float> (0.0f, 1.0f, 0.0f), 0.0f,
+                                                                  attrs (Unit::Pct)));
+    }
+
     p.push_back (std::make_unique<juce::AudioParameterBool> (juce::ParameterID { syncId, 1 },     "Tempo Sync", true));
     p.push_back (std::make_unique<juce::AudioParameterBool> (juce::ParameterID { keytrackId, 1 }, "Key Track",  false));
+    p.push_back (std::make_unique<juce::AudioParameterBool> (juce::ParameterID { keylockId, 1 },  "Key Lock",   false));
+    p.push_back (std::make_unique<juce::AudioParameterBool> (juce::ParameterID { autoplayId, 1 }, "Auto Play",  true));
 
     return { p.begin(), p.end() };
 }
@@ -81,6 +100,16 @@ KickforgeAudioProcessor::KickforgeAudioProcessor()
     }
     syncRaw     = apvts.getRawParameterValue (syncId);
     keytrackRaw = apvts.getRawParameterValue (keytrackId);
+    keylockRaw  = apvts.getRawParameterValue (keylockId);
+    autoplayRaw = apvts.getRawParameterValue (autoplayId);
+    fEndRaw     = apvts.getRawParameterValue ("fEnd");
+    for (int l = 0; l < 4; ++l)
+    {
+        onRaw[l]   = apvts.getRawParameterValue (onId (l));
+        sOffRaw[l] = apvts.getRawParameterValue (sOffId (l));
+        sDecRaw[l] = apvts.getRawParameterValue (sDecId (l));
+        sDrvRaw[l] = apvts.getRawParameterValue (sDrvId (l));
+    }
 
     presets.getStateXml = [this] { return createStateXml(); };
     presets.setStateXml = [this] (const juce::XmlElement& x) { applyStateXml (x); };
@@ -115,7 +144,11 @@ kf::IndustrialParams KickforgeAudioProcessor::buildParams() const
     {
         p.layerMode[l]       = srcRaw[l]->load();
         p.sampleGain[l]      = sGainRaw[l]->load();
-        p.samplePitchSemi[l] = sPitchRaw[l]->load();
+        p.samplePitchSemi[l] = sPitchRaw[l]->load() + getKeyLockShift (l);
+        p.layerOn[l]         = onRaw[l]->load();
+        p.sampleOffsetMs[l]  = sOffRaw[l]->load();
+        p.sampleDecayMs[l]   = sDecRaw[l]->load();
+        p.sampleDrive[l]     = sDrvRaw[l]->load();
     }
     return p;
 }
@@ -268,6 +301,13 @@ bool KickforgeAudioProcessor::loadLayerSampleInternal (int layer, const juce::Fi
         layerSamples[layer] = s;
         layerSamplePaths[layer] = file.getFullPathName();
     }
+    // Grundton: aus der Bibliothek (Kit-Tonart) oder direkt erkennen
+    float root = 0.0f;
+    const int libIdx = library->indexOfFile (file);
+    if (libIdx >= 0) root = library->getEntry (libIdx).rootHz;
+    else if (layer == 1 || layer == 2) root = kf::SampleLibrary::detectRootHz (s->buffer, s->sampleRate);
+    layerRoot[layer].store (root);
+    pendingRelink[layer].clear();
     engine.setLayerSample (layer, s);
     if (switchToSample) setParamValue (srcId (layer), 1.0f);
     changeCounter.fetch_add (1);
@@ -288,8 +328,134 @@ void KickforgeAudioProcessor::clearLayerSample (int layer)
         layerSamplePaths[layer].clear();
     }
     engine.setLayerSample (layer, nullptr);
+    layerRoot[layer].store (0.0f);
     setParamValue (srcId (layer), 0.0f);
     changeCounter.fetch_add (1);
+}
+
+juce::String KickforgeAudioProcessor::getLayerSampleName (int layer) const
+{
+    const auto path = getLayerSamplePath (layer);
+    if (path.isEmpty()) return {};
+    const juce::File f (path);
+    const int idx = library->indexOfFile (f);
+    return idx >= 0 ? library->getEntry (idx).display : f.getFileNameWithoutExtension();
+}
+
+float KickforgeAudioProcessor::getLayerRootHz (int layer) const
+{
+    return juce::isPositiveAndBelow (layer, 4) ? layerRoot[layer].load() : 0.0f;
+}
+
+float KickforgeAudioProcessor::getKeyLockShift (int layer) const
+{
+    // nur tonale Schichten (Punch, Rumble), auf den nächsten Oktav-Abstand (±6 Halbtöne)
+    if (keylockRaw == nullptr || keylockRaw->load() < 0.5f || (layer != 1 && layer != 2)) return 0.0f;
+    const float root = layerRoot[layer].load(), key = fEndRaw->load();
+    if (root <= 0.0f || key <= 0.0f) return 0.0f;
+    float st = 12.0f * std::log2 (key / root);
+    st -= 12.0f * std::round (st / 12.0f);
+    return st;
+}
+
+// =========================================================================
+// Bibliothek
+// =========================================================================
+bool KickforgeAudioProcessor::loadLibraryEntry (int layer, int entryIndex)
+{
+    const auto e = library->getEntry (entryIndex);
+    if (e.file == juce::File() || ! loadLayerSampleInternal (layer, e.file, true)) return false;
+    setParamValue (onId (layer), 1.0f);
+    currentKit = -1;
+    autoplay();
+    return true;
+}
+
+void KickforgeAudioProcessor::stepLayerSample (int layer, int delta)
+{
+    const auto list = library->entriesForLayer (layer);
+    if (list.empty()) return;
+    const int cur = library->indexOfFile (juce::File (getLayerSamplePath (layer)));
+    const auto it = std::find (list.begin(), list.end(), cur);
+    int pos = it == list.end() ? (delta > 0 ? -1 : 0) : (int) (it - list.begin());
+    pos = ((pos + delta) % (int) list.size() + (int) list.size()) % (int) list.size();
+    loadLibraryEntry (layer, list[(size_t) pos]);
+}
+
+void KickforgeAudioProcessor::randomLayerSample (int layer)
+{
+    const auto list = library->entriesForLayer (layer);
+    if (! list.empty())
+        loadLibraryEntry (layer, list[(size_t) rng.nextInt ((int) list.size())]);
+}
+
+bool KickforgeAudioProcessor::loadKit (int kitIndex)
+{
+    const auto kits = library->getKits();
+    if (! juce::isPositiveAndBelow (kitIndex, (int) kits.size())) return false;
+    const auto& k = kits[(size_t) kitIndex];
+    for (int l = 0; l < 4; ++l)
+    {
+        // frisches Kit: Sample-Regler auf neutral
+        setParamValue (sGainId (l), 0.8f);
+        setParamValue (sPitchId (l), 0.0f);
+        setParamValue (sOffId (l), 0.0f);
+        setParamValue (sDecId (l), 1000.0f);
+        setParamValue (sDrvId (l), 0.0f);
+        const auto e = library->getEntry (k.entry[l]);
+        const bool ok = k.entry[l] >= 0 && loadLayerSampleInternal (l, e.file, true);
+        setParamValue (onId (l), ok ? 1.0f : 0.0f);
+    }
+    // Master als sanfter Kleber statt Synth-Verzerrung
+    setParamValue ("masterDrive", 0.1f);
+    setParamValue ("masterLowTone", 2500.0f);
+    setParamValue ("outGain", 0.95f);
+    currentKit = kitIndex;
+    autoplay();
+    return true;
+}
+
+void KickforgeAudioProcessor::stepKit (int delta)
+{
+    const int n = (int) library->getKits().size();
+    if (n == 0) return;
+    const int cur = currentKit < 0 ? (delta > 0 ? -1 : 0) : currentKit;
+    loadKit (((cur + delta) % n + n) % n);
+}
+
+void KickforgeAudioProcessor::randomKick()
+{
+    bool any = false;
+    for (int l = 0; l < 4; ++l)
+    {
+        std::vector<int> list;
+        for (int i : library->entriesForLayer (l))
+            if (! library->getEntry (i).fullKick) list.push_back (i);
+        if (list.empty()) continue;
+        const auto e = library->getEntry (list[(size_t) rng.nextInt ((int) list.size())]);
+        if (loadLayerSampleInternal (l, e.file, true)) { setParamValue (onId (l), 1.0f); any = true; }
+    }
+    if (! any) return;
+    setParamValue (keylockId, 1.0f);   // zufällige Kombination → alles in eine Tonart
+    currentKit = -1;
+    autoplay();
+}
+
+void KickforgeAudioProcessor::timerCallback()
+{
+    // Samples aus einem gespeicherten Projekt, deren Pfad nicht mehr stimmt:
+    // nach dem Bibliotheks-Scan über den Dateinamen wiederfinden
+    if (library->isScanning()) return;
+    bool pending = false;
+    for (int l = 0; l < 4; ++l)
+    {
+        if (pendingRelink[l].isEmpty()) continue;
+        const int idx = library->findByFileName (pendingRelink[l]);
+        if (idx >= 0) loadLayerSampleInternal (l, library->getEntry (idx).file, false);
+        pendingRelink[l].clear();
+        pending = true;
+    }
+    if (! pending) stopTimer();
 }
 
 juce::String KickforgeAudioProcessor::getLayerSamplePath (int layer) const
@@ -340,10 +506,16 @@ void KickforgeAudioProcessor::applyStateXml (const juce::XmlElement& xml)
             loadLayerSampleInternal (l, f, false);   // Modus kommt aus dem gespeicherten Parameter
         else
         {
+            if (path.isNotEmpty())
+            {
+                pendingRelink[l] = f.getFileName();   // nach dem Scan in der Bibliothek suchen
+                startTimer (500);
+            }
             const juce::SpinLock::ScopedLockType sl (samplesLock);
             layerSamples[l].reset();
             layerSamplePaths[l].clear();
             engine.setLayerSample (l, nullptr);
+            layerRoot[l].store (0.0f);
         }
     }
     changeCounter.fetch_add (1);
